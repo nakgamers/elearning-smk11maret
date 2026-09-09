@@ -24,10 +24,11 @@ COPY --from=gobuild /elearning /usr/local/bin/elearning
 
 # Frontend (standalone Next)
 COPY --from=webuild /web/.next ./.next
-COPY --from=webuild /web/public ./public
 COPY --from=webuild /web/node_modules ./node_modules
 COPY --from=webuild /web/package.json ./package.json
 COPY --from=webuild /web/next.config.mjs ./next.config.mjs
+# web/public boleh kosong (dir tak ikut ter-commit); buat agar Next tak error
+RUN mkdir -p /srv/public
 
 # Upload dir (untuk file materi/tugas)
 RUN mkdir -p /srv/uploads && chown -R node:node /srv
