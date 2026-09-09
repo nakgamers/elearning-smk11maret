@@ -35,13 +35,12 @@ RUN mkdir -p /srv/uploads && chown -R node:node /srv
 
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
-ENV BACKEND_URL=http://127.0.0.1:8080
-ENV PORT=8080
+ENV BACKEND_URL=http://127.0.0.1:8081
 
-# Jalankan keduanya: Go (8080) + Next (3000)
+# Jalankan keduanya: Go (8081) + Next (di $PORT Railway, default 8080)
 COPY docker-entrypoint.sh /docker-entrypoint.sh
 RUN chmod +x /docker-entrypoint.sh
 
-EXPOSE 3000
+EXPOSE 8080
 USER node
 ENTRYPOINT ["/docker-entrypoint.sh"]
