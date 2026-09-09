@@ -1,0 +1,24 @@
+# Go
+server/elearning.exe
+server/tmp/
+server/uploads/
+server/smoke-*
+*.exe
+*.exe~
+
+# Node
+web/node_modules/
+web/.next/
+web/out/
+web/dev-*.mjs
+npm-debug.log*
+
+# Flutter
+mobile/.dart_tool/
+mobile/android/.gradle/
+mobile/build/
+
+# OS
+.DS_Store
+Thumbs.db
+*.log
