@@ -259,14 +259,52 @@ function Tugas() {
   )
 }
 
+const IMG_EXT = /\.(png|jpe?g|gif|webp|bmp|svg)$/i
+
 function SubRow({ s, onSave }) {
   const [nilai, setNilai] = useState(s.nilai ?? '')
   const [fb, setFb] = useState(s.feedback ?? '')
+  const [zoom, setZoom] = useState(false)
+  const isImg = !!s.file_url && IMG_EXT.test(s.file_url)
+  useEffect(() => {
+    if (!zoom) return
+    const h = (e) => { if (e.key === 'Escape') setZoom(false) }
+    window.addEventListener('keydown', h)
+    return () => window.removeEventListener('keydown', h)
+  }, [zoom])
   return (
     <tr>
       <td>{s.nis}</td>
       <td>{s.nama}</td>
-      <td style={{ maxWidth: 260 }}>{s.jawaban || (s.file_url ? <a href={s.file_url} target="_blank" rel="noreferrer">📎 file</a> : '—')}</td>
+      <td style={{ maxWidth: 280 }}>
+        {s.jawaban && <div style={{ whiteSpace: 'pre-wrap', marginBottom: s.file_url ? 6 : 0 }}>{s.jawaban}</div>}
+        {isImg && (
+          <>
+            <img
+              src={s.file_url}
+              alt={`Kumpulan ${s.nama}`}
+              title="Klik untuk memperbesar"
+              loading="lazy"
+              onClick={() => setZoom(true)}
+              style={{ maxWidth: 160, maxHeight: 120, borderRadius: 8, border: '1px solid #e2e8f0', cursor: 'zoom-in', display: 'block' }}
+            />
+            {zoom && (
+              <div
+                onClick={() => setZoom(false)}
+                role="dialog"
+                aria-modal="true"
+                aria-label="Pratinjau gambar"
+                style={{ position: 'fixed', inset: 0, zIndex: 100, background: 'rgba(2,6,23,.9)', display: 'grid', placeItems: 'center', padding: 16, cursor: 'zoom-out' }}
+              >
+                <img src={s.file_url} alt={`Kumpulan ${s.nama} (diperbesar)`}
+                  style={{ maxWidth: '94vw', maxHeight: '86vh', objectFit: 'contain', borderRadius: 12 }} />
+              </div>
+            )}
+          </>
+        )}
+        {s.file_url && !isImg && <a href={s.file_url} target="_blank" rel="noreferrer">📎 Buka dokumen</a>}
+        {!s.jawaban && !s.file_url && '—'}
+      </td>
       <td><input className="input" style={{ width: 70, padding: '4px 8px' }} type="number" value={nilai} onChange={(e) => setNilai(e.target.value)} /></td>
       <td><input className="input" style={{ width: 150, padding: '4px 8px' }} value={fb} onChange={(e) => setFb(e.target.value)} /></td>
       <td><button className="btn btn-primary" style={{ padding: '4px 10px', fontSize: 12 }} onClick={() => onSave(s.id, nilai, fb)}>Simpan</button></td>

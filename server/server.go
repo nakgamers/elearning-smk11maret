@@ -51,10 +51,11 @@ func NewApp(cfg Config, pool *pgxpool.Pool, cache Cache, log *zap.Logger) *fiber
 
 	// === Guru/Admin ===
 	api.Get("/subjects", adminGuru, s.listSubjects)
-	api.Post("/subjects", adminOnly, s.createSubject)
+	api.Post("/subjects", adminGuru, s.createSubject)
 	api.Get("/cps", adminGuru, s.listCPs)
-	api.Post("/cps", adminOnly, s.createCP)
-	api.Get("/teachers", adminOnly, s.listTeachers)
+	api.Post("/cps", adminGuru, s.createCP)
+	api.Put("/cps/:id", adminGuru, s.updateCP)
+	api.Get("/teachers", adminGuru, s.listTeachers)
 	api.Post("/teachers", adminOnly, s.createTeacher)
 	// Siswa: lihat = admin+guru; tambah/edit/import/hapus = admin saja.
 	api.Get("/students", adminGuru, s.listStudents)
@@ -260,6 +261,28 @@ func (s *Server) createCP(c fiber.Ctx) error {
 		return err
 	}
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"id": id})
+}
+
+// Edit CP yang sudah ada (admin & guru).
+func (s *Server) updateCP(c fiber.Ctx) error {
+	id, _ := strconv.ParseInt(c.Params("id"), 10, 64)
+	var b struct {
+		MapelID   int64  `json:"mapel_id"`
+		Fase      string `json:"fase"`
+		Elemen    string `json:"elemen"`
+		Deskripsi string `json:"deskripsi"`
+	}
+	if err := c.Bind().Body(&b); err != nil {
+		return fiber.ErrBadRequest
+	}
+	_, err := s.pool.Exec(c.RequestCtx(),
+		`UPDATE cps SET mapel_id=COALESCE(NULLIF($1,0),mapel_id), fase=COALESCE(NULLIF($2,''),fase),
+		 elemen=COALESCE(NULLIF($3,''),elemen), deskripsi=COALESCE(NULLIF($4,''),deskripsi) WHERE id=$5`,
+		b.MapelID, b.Fase, b.Elemen, b.Deskripsi, id)
+	if err != nil {
+		return err
+	}
+	return c.JSON(fiber.Map{"ok": true})
 }
 
 func (s *Server) listTeachers(c fiber.Ctx) error {

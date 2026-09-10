@@ -42,6 +42,8 @@ function Mapel() {
   const [f, setF] = useState({ nama: '', kode: '' })
   const [cp, setCp] = useState({ mapel_id: '', fase: 'E', elemen: '', deskripsi: '' })
   const [msg, setMsg] = useState('')
+  const [editId, setEditId] = useState(null)
+  const [ef, setEf] = useState({ mapel_id: '', fase: 'E', elemen: '', deskripsi: '' })
 
   async function addSubject(e) {
     e.preventDefault(); setMsg('')
@@ -52,6 +54,19 @@ function Mapel() {
     e.preventDefault(); setMsg('')
     try { await api.post('/cps', { ...cp, mapel_id: +cp.mapel_id }); setCp({ mapel_id: '', fase: 'E', elemen: '', deskripsi: '' }); rCps() }
     catch (e) { setMsg('❌ ' + e.message) }
+  }
+
+  function openEdit(c) {
+    setEditId(c.id)
+    setEf({ mapel_id: c.mapel_id, fase: c.fase || 'E', elemen: c.elemen, deskripsi: c.deskripsi })
+  }
+  async function saveEdit() {
+    setMsg('')
+    try {
+      await api.put(`/cps/${editId}`, { mapel_id: +ef.mapel_id || 0, fase: ef.fase, elemen: ef.elemen, deskripsi: ef.deskripsi })
+      setMsg('✅ CP diperbarui.')
+      setEditId(null); rCps()
+    } catch (e) { setMsg('❌ ' + e.message) }
   }
 
   return (
@@ -82,9 +97,27 @@ function Mapel() {
       <div className="card" style={{ padding: 16 }}>
         <div style={{ fontWeight: 700, marginBottom: 10 }}>Capaian Pembelajaran (per mapel)</div>
         <table className="tbl">
-          <thead><tr><th>Mapel</th><th>Fase</th><th>Elemen</th><th>CP</th></tr></thead>
-          <tbody>{cps.map((c) => (
-            <tr key={c.id}><td>{c.mapel}</td><td>{c.fase}</td><td>{c.elemen}</td><td>{c.deskripsi}</td></tr>
+          <thead><tr><th>Mapel</th><th>Fase</th><th>Elemen</th><th>CP</th><th>Aksi</th></tr></thead>
+          <tbody>{cps.map((c) => editId === c.id ? (
+            <tr key={c.id}>
+              <td>
+                <select className="input" style={{ padding: '4px 8px' }} value={ef.mapel_id} onChange={(e) => setEf({ ...ef, mapel_id: e.target.value })}>
+                  {subjects.map((s) => <option key={s.id} value={s.id}>{s.nama}</option>)}
+                </select>
+              </td>
+              <td><input className="input" style={{ padding: '4px 8px', width: 60 }} value={ef.fase} onChange={(e) => setEf({ ...ef, fase: e.target.value })} /></td>
+              <td><input className="input" style={{ padding: '4px 8px' }} value={ef.elemen} onChange={(e) => setEf({ ...ef, elemen: e.target.value })} /></td>
+              <td><input className="input" style={{ padding: '4px 8px' }} value={ef.deskripsi} onChange={(e) => setEf({ ...ef, deskripsi: e.target.value })} /></td>
+              <td style={{ whiteSpace: 'nowrap' }}>
+                <button className="btn btn-primary btn-sm" onClick={saveEdit}>Simpan</button>{' '}
+                <button className="btn btn-ghost btn-sm" onClick={() => setEditId(null)}>Batal</button>
+              </td>
+            </tr>
+          ) : (
+            <tr key={c.id}>
+              <td>{c.mapel}</td><td>{c.fase}</td><td>{c.elemen}</td><td>{c.deskripsi}</td>
+              <td><button className="btn btn-ghost btn-sm" onClick={() => openEdit(c)}>Edit</button></td>
+            </tr>
           ))}</tbody>
         </table>
       </div>
