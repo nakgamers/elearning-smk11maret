@@ -46,18 +46,28 @@ func NewApp(cfg Config, pool *pgxpool.Pool, cache Cache, log *zap.Logger) *fiber
 
 	// Role guard sebagai middleware inline (dua Group("") akan digabung Fiber).
 	adminGuru := s.requireRole("admin", "guru")
+	adminOnly := s.requireRole("admin")
 	siswa := s.requireRole("siswa")
 
 	// === Guru/Admin ===
 	api.Get("/subjects", adminGuru, s.listSubjects)
-	api.Post("/subjects", adminGuru, s.createSubject)
+	api.Post("/subjects", adminOnly, s.createSubject)
 	api.Get("/cps", adminGuru, s.listCPs)
-	api.Post("/cps", adminGuru, s.createCP)
-	api.Get("/teachers", adminGuru, s.listTeachers)
-	api.Post("/teachers", adminGuru, s.createTeacher)
+	api.Post("/cps", adminOnly, s.createCP)
+	api.Get("/teachers", adminOnly, s.listTeachers)
+	api.Post("/teachers", adminOnly, s.createTeacher)
+	// Siswa: lihat = admin+guru; tambah/edit/import/hapus = admin saja.
 	api.Get("/students", adminGuru, s.listStudents)
-	api.Post("/students/import", adminGuru, s.importStudents)
-	api.Delete("/students/:id", adminGuru, s.deleteStudent)
+	api.Post("/students", adminOnly, s.createStudent)
+	api.Put("/students/:id", adminOnly, s.updateStudent)
+	api.Post("/students/import", adminOnly, s.importStudents)
+	api.Delete("/students/:id", adminOnly, s.deleteStudent)
+	// Rombel & wali kelas.
+	api.Get("/rombel", adminGuru, s.listRombel)
+	api.Post("/rombel", adminOnly, s.createRombel)
+	api.Put("/rombel/:id", adminOnly, s.updateRombel)
+	api.Delete("/rombel/:id", adminOnly, s.deleteRombel)
+	api.Get("/walas/attendance", adminGuru, s.walasAttendance)
 	api.Get("/materials", adminGuru, s.listMaterials)
 	api.Post("/materials", adminGuru, s.createMaterial)
 	api.Get("/assignments", adminGuru, s.listAssignments)
@@ -166,8 +176,17 @@ func (s *Server) login(c fiber.Ctx) error {
 		return fiber.ErrUnauthorized
 	}
 	tok := SignToken(s.cfg.Secret, uid, role, mapelID, 12*time.Hour)
-	return c.JSON(fiber.Map{"token": tok, "user": fiber.Map{
-		"id": uid, "nama": nama, "role": role, "mapel_id": mapelID}})
+	resp := fiber.Map{"token": tok, "user": fiber.Map{
+		"id": uid, "nama": nama, "role": role, "mapel_id": mapelID}}
+	// Info wali kelas (rombel yang diampu) utk guru → tab "Walas".
+	if role == "guru" {
+		var wid int64
+		var wnama string
+		if e := s.pool.QueryRow(ctx, `SELECT id,nama FROM rombel WHERE walas_id=$1`, uid).Scan(&wid, &wnama); e == nil && wid > 0 {
+			resp["walas"] = fiber.Map{"rombel_id": wid, "rombel": wnama}
+		}
+	}
+	return c.JSON(resp)
 }
 
 // ---------- subjects / CP / teachers ----------
@@ -288,11 +307,19 @@ func (s *Server) createTeacher(c fiber.Ctx) error {
 // ---------- students ----------
 
 func (s *Server) listStudents(c fiber.Ctx) error {
-	q := `SELECT id,nis,nama,kelas,jk FROM students WHERE aktif`
+	onlyActive := c.Query("all") != "1"
+	q := `SELECT id,nis,nama,kelas,jk,aktif FROM students`
 	args := []any{}
+	conds := []string{}
+	if onlyActive {
+		conds = append(conds, "aktif")
+	}
 	if k := c.Query("kelas"); k != "" {
 		args = append(args, k)
-		q += fmt.Sprintf(" AND kelas=$%d", len(args))
+		conds = append(conds, fmt.Sprintf("kelas=$%d", len(args)))
+	}
+	if len(conds) > 0 {
+		q += " WHERE " + strings.Join(conds, " AND ")
 	}
 	q += " ORDER BY kelas,nis"
 	rows, err := s.pool.Query(c.RequestCtx(), q, args...)
@@ -304,13 +331,78 @@ func (s *Server) listStudents(c fiber.Ctx) error {
 	for rows.Next() {
 		var id int64
 		var nis, nama, kelas, jk string
-		rows.Scan(&id, &nis, &nama, &kelas, &jk)
-		out = append(out, fiber.Map{"id": id, "nis": nis, "nama": nama, "kelas": kelas, "jk": jk})
+		var aktif bool
+		rows.Scan(&id, &nis, &nama, &kelas, &jk, &aktif)
+		out = append(out, fiber.Map{"id": id, "nis": nis, "nama": nama, "kelas": kelas, "jk": jk, "aktif": aktif})
 	}
 	return c.JSON(out)
 }
 
-// Import siswa dari xlsx: kolom NIS | Nama | Kelas | JK (baris 1 = header).
+// Tambah satu siswa (admin only).
+func (s *Server) createStudent(c fiber.Ctx) error {
+	var b struct {
+		NIS      string `json:"nis"`
+		Nama     string `json:"nama"`
+		Kelas    string `json:"kelas"`
+		JK       string `json:"jk"`
+		Password string `json:"password"`
+	}
+	if err := c.Bind().Body(&b); err != nil || b.NIS == "" || b.Nama == "" || b.Kelas == "" {
+		return fiber.ErrBadRequest
+	}
+	pw := def(b.Password, "siswa123")
+	h, err := HashPassword(pw)
+	if err != nil {
+		return err
+	}
+	var id int64
+	err = s.pool.QueryRow(c.RequestCtx(),
+		`INSERT INTO students(nis,nama,kelas,jk,password_hash) VALUES($1,$2,$3,$4,$5) RETURNING id`,
+		b.NIS, b.Nama, b.Kelas, defJk(b.JK), h).Scan(&id)
+	if err != nil {
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "NIS sudah terdaftar"})
+	}
+	// pastikan rombel tersedia
+	_, _ = s.pool.Exec(c.RequestCtx(), `INSERT INTO rombel(nama) VALUES($1) ON CONFLICT(nama) DO NOTHING`, b.Kelas)
+	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"id": id})
+}
+
+// Edit siswa (admin only): nama, kelas, JK, password opsional, aktif.
+func (s *Server) updateStudent(c fiber.Ctx) error {
+	id, _ := strconv.ParseInt(c.Params("id"), 10, 64)
+	var b struct {
+		NIS      string `json:"nis"`
+		Nama     string `json:"nama"`
+		Kelas    string `json:"kelas"`
+		JK       string `json:"jk"`
+		Password string `json:"password"`
+		Aktif    *bool  `json:"aktif"`
+	}
+	if err := c.Bind().Body(&b); err != nil {
+		return fiber.ErrBadRequest
+	}
+	ctx := c.RequestCtx()
+	if b.Nama != "" || b.NIS != "" || b.Kelas != "" || b.JK != "" {
+		if _, err := s.pool.Exec(ctx,
+			`UPDATE students SET nis=COALESCE(NULLIF($1,''),nis), nama=COALESCE(NULLIF($2,''),nama),
+			 kelas=COALESCE(NULLIF($3,''),kelas), jk=COALESCE(NULLIF($4,''),jk) WHERE id=$5`,
+			b.NIS, b.Nama, b.Kelas, b.JK, id); err != nil {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "NIS sudah dipakai"})
+		}
+		if b.Kelas != "" {
+			_, _ = s.pool.Exec(ctx, `INSERT INTO rombel(nama) VALUES($1) ON CONFLICT(nama) DO NOTHING`, b.Kelas)
+		}
+	}
+	if b.Password != "" && len(b.Password) >= 6 {
+		if h, err := HashPassword(b.Password); err == nil {
+			_, _ = s.pool.Exec(ctx, `UPDATE students SET password_hash=$1 WHERE id=$2`, h, id)
+		}
+	}
+	if b.Aktif != nil {
+		_, _ = s.pool.Exec(ctx, `UPDATE students SET aktif=$1 WHERE id=$2`, *b.Aktif, id)
+	}
+	return c.JSON(fiber.Map{"ok": true})
+}
 func (s *Server) importStudents(c fiber.Ctx) error {
 	fh, err := c.FormFile("file")
 	if err != nil {
@@ -342,6 +434,11 @@ func (s *Server) importStudents(c fiber.Ctx) error {
 		}
 		imported++
 	}
+	// Sinkronkan rombel dari kelas yang diimpor.
+	if _, err := s.pool.Exec(ctx,
+		`INSERT INTO rombel(nama) SELECT DISTINCT kelas FROM students WHERE kelas<>'' AND aktif ON CONFLICT(nama) DO NOTHING`); err != nil {
+		return err
+	}
 	return c.JSON(fiber.Map{"imported": imported, "skipped": skipped})
 }
 
@@ -349,6 +446,157 @@ func (s *Server) deleteStudent(c fiber.Ctx) error {
 	id, _ := strconv.ParseInt(c.Params("id"), 10, 64)
 	_, err := s.pool.Exec(c.RequestCtx(), `UPDATE students SET aktif=FALSE WHERE id=$1`, id)
 	return errOr(c, err, fiber.Map{"ok": true})
+}
+
+// ---------- rombel & wali kelas ----------
+
+func (s *Server) listRombel(c fiber.Ctx) error {
+	rows, err := s.pool.Query(c.RequestCtx(),
+		`SELECT r.id,r.nama,COALESCE(u.nama,''),COALESCE(u.id,0),
+		        (SELECT count(*) FROM students st WHERE st.kelas=r.nama AND st.aktif)
+		 FROM rombel r LEFT JOIN users u ON u.id=r.walas_id
+		 ORDER BY r.nama`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	out := []fiber.Map{}
+	for rows.Next() {
+		var id, walasID, nSiswa int64
+		var nama, walasNama string
+		rows.Scan(&id, &nama, &walasNama, &walasID, &nSiswa)
+		out = append(out, fiber.Map{"id": id, "nama": nama, "walas_id": walasID,
+			"walas": walasNama, "jumlah_siswa": nSiswa})
+	}
+	return c.JSON(out)
+}
+
+func (s *Server) createRombel(c fiber.Ctx) error {
+	var b struct {
+		Nama    string `json:"nama"`
+		WalasID int64  `json:"walas_id"`
+	}
+	if err := c.Bind().Body(&b); err != nil || b.Nama == "" {
+		return fiber.ErrBadRequest
+	}
+	var id int64
+	err := s.pool.QueryRow(c.RequestCtx(),
+		`INSERT INTO rombel(nama,walas_id) VALUES($1,NULLIF($2,0)) ON CONFLICT(nama) DO NOTHING RETURNING id`,
+		b.Nama, b.WalasID).Scan(&id)
+	if err != nil {
+		// sudah ada → ambil id & tetap set walas kalau diminta
+		s.pool.QueryRow(c.RequestCtx(), `SELECT id FROM rombel WHERE nama=$1`, b.Nama).Scan(&id)
+		if b.WalasID > 0 {
+			s.pool.Exec(c.RequestCtx(), `UPDATE rombel SET walas_id=$1 WHERE id=$2`, b.WalasID, id)
+		}
+	}
+	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"id": id})
+}
+
+func (s *Server) updateRombel(c fiber.Ctx) error {
+	id, _ := strconv.ParseInt(c.Params("id"), 10, 64)
+	var b struct {
+		Nama    string `json:"nama"`
+		WalasID *int64 `json:"walas_id"` // pointer: boleh clear ke 0
+	}
+	if err := c.Bind().Body(&b); err != nil {
+		return fiber.ErrBadRequest
+	}
+	ctx := c.RequestCtx()
+	if b.Nama != "" {
+		var old string
+		if err := s.pool.QueryRow(ctx, `SELECT nama FROM rombel WHERE id=$1`, id).Scan(&old); err != nil {
+			return fiber.ErrNotFound
+		}
+		if _, err := s.pool.Exec(ctx, `UPDATE rombel SET nama=$1 WHERE id=$2`, b.Nama, id); err != nil {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "Nama rombel sudah ada"})
+		}
+		// sinkronkan kelas siswa yang mengikuti rombel ini
+		_, _ = s.pool.Exec(ctx, `UPDATE students SET kelas=$1 WHERE kelas=$2`, b.Nama, old)
+	}
+	if b.WalasID != nil {
+		if _, err := s.pool.Exec(ctx,
+			`UPDATE rombel SET walas_id=CASE WHEN $1=0 THEN NULL ELSE $1 END WHERE id=$2`,
+			*b.WalasID, id); err != nil {
+			return err
+		}
+	}
+	return c.JSON(fiber.Map{"ok": true})
+}
+
+func (s *Server) deleteRombel(c fiber.Ctx) error {
+	id, _ := strconv.ParseInt(c.Params("id"), 10, 64)
+	_, err := s.pool.Exec(c.RequestCtx(), `DELETE FROM rombel WHERE id=$1`, id)
+	return errOr(c, err, fiber.Map{"ok": true})
+}
+
+// Kehadiran siswa di rombel wali kelas, per mata pelajaran (diampu guru lain).
+func (s *Server) walasAttendance(c fiber.Ctx) error {
+	cl := claimsOf(c)
+	ctx := c.RequestCtx()
+	// admin boleh lihat rombel mana pun via ?rombel_id; guru wajib walas di rombel tsb.
+	rid, _ := strconv.ParseInt(c.Query("rombel_id"), 10, 64)
+	if rid == 0 {
+		s.pool.QueryRow(ctx, `SELECT id FROM rombel WHERE walas_id=$1`, cl.UID).Scan(&rid)
+	}
+	if rid == 0 {
+		return fiber.ErrNotFound
+	}
+	if cl.Role != "admin" {
+		var ok bool
+		s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM rombel WHERE id=$1 AND walas_id=$2)`, rid, cl.UID).Scan(&ok)
+		if !ok {
+			return fiber.ErrForbidden
+		}
+	}
+	var namaRombel string
+	s.pool.QueryRow(ctx, `SELECT nama FROM rombel WHERE id=$1`, rid).Scan(&namaRombel)
+	tanggal := c.Query("tanggal")
+	if tanggal == "" {
+		tanggal = time.Now().Format("2006-01-02")
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT st.id,st.nis,st.nama,st.jk,a.mapel_id,COALESCE(sb.nama,''),a.status
+		 FROM students st
+		 LEFT JOIN attendance a ON a.student_id=st.id AND a.tanggal=$2::date
+		 LEFT JOIN subjects sb ON sb.id=a.mapel_id
+		 WHERE st.kelas=$1 AND st.aktif
+		 ORDER BY st.nis`, namaRombel, tanggal)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	// hasil: daftar mapel (kolom) + per siswa, status per mapel.
+	mapelCols := []fiber.Map{}
+	mapelIdx := map[int64]int{}
+	siswa := []fiber.Map{}
+	siswaById := map[int64]int{}
+	for rows.Next() {
+		var sid, mid int64
+		var nis, nama, jk, mapel, status string
+		rows.Scan(&sid, &nis, &nama, &jk, &mid, &mapel, &status)
+		i, ok := siswaById[sid]
+		if !ok {
+			siswaById[sid] = len(siswa)
+			siswa = append(siswa, fiber.Map{"id": sid, "nis": nis, "nama": nama, "jk": jk, "status": fiber.Map{}})
+			i = len(siswa) - 1
+		}
+		if mid > 0 {
+			ci, ok := mapelIdx[mid]
+			if !ok {
+				mapelIdx[mid] = len(mapelCols)
+				mapelCols = append(mapelCols, fiber.Map{"id": mid, "nama": mapel})
+				ci = len(mapelCols) - 1
+			}
+			_ = ci
+			st := siswa[i]["status"].(fiber.Map)
+			st[mapel] = status
+		}
+	}
+	return c.JSON(fiber.Map{
+		"rombel": namaRombel, "tanggal": tanggal,
+		"mapel": mapelCols, "siswa": siswa,
+	})
 }
 
 // ---------- materials ----------
@@ -535,8 +783,9 @@ func (s *Server) exportGrades(c fiber.Ctx) error {
 // ---------- attendance ----------
 
 func (s *Server) listAttendance(c fiber.Ctx) error {
-	q := `SELECT a.id,st.nis,st.nama,st.kelas,a.tanggal,a.status,a.keterangan
-	      FROM attendance a JOIN students st ON st.id=a.student_id WHERE TRUE`
+	q := `SELECT a.id,st.nis,st.nama,st.kelas,a.tanggal,a.status,a.keterangan,a.mapel_id,COALESCE(sb.nama,'')
+	      FROM attendance a JOIN students st ON st.id=a.student_id
+	      LEFT JOIN subjects sb ON sb.id=a.mapel_id WHERE TRUE`
 	args := []any{}
 	if k := c.Query("kelas"); k != "" {
 		args = append(args, k)
@@ -546,6 +795,10 @@ func (s *Server) listAttendance(c fiber.Ctx) error {
 		args = append(args, t)
 		q += fmt.Sprintf(" AND a.tanggal=$%d::date", len(args))
 	}
+	if m := c.Query("mapel_id"); m != "" {
+		args = append(args, m)
+		q += fmt.Sprintf(" AND a.mapel_id=$%d", len(args))
+	}
 	q += " ORDER BY a.tanggal DESC,st.nis LIMIT 500"
 	rows, err := s.pool.Query(c.RequestCtx(), q, args...)
 	if err != nil {
@@ -554,31 +807,33 @@ func (s *Server) listAttendance(c fiber.Ctx) error {
 	defer rows.Close()
 	out := []fiber.Map{}
 	for rows.Next() {
-		var id int64
-		var nis, nama, kelas, status, ket string
+		var id, mid int64
+		var nis, nama, kelas, status, ket, mapel string
 		var tgl time.Time
-		rows.Scan(&id, &nis, &nama, &kelas, &tgl, &status, &ket)
+		rows.Scan(&id, &nis, &nama, &kelas, &tgl, &status, &ket, &mid, &mapel)
 		out = append(out, fiber.Map{"id": id, "nis": nis, "nama": nama, "kelas": kelas,
-			"tanggal": tgl.Format("2006-01-02"), "status": status, "keterangan": ket})
+			"tanggal": tgl.Format("2006-01-02"), "status": status, "keterangan": ket,
+			"mapel_id": mid, "mapel": mapel})
 	}
 	return c.JSON(out)
 }
 
-// Set absen manual oleh guru/admin (bulk per siswa).
+// Set absen manual oleh guru/admin (bulk per siswa, per mapel).
 func (s *Server) setAttendance(c fiber.Ctx) error {
 	var b struct {
 		StudentID  int64  `json:"student_id"`
 		Tanggal    string `json:"tanggal"`
 		Status     string `json:"status"`
 		Keterangan string `json:"keterangan"`
+		MapelID    int64  `json:"mapel_id"`
 	}
 	if err := c.Bind().Body(&b); err != nil || b.StudentID == 0 || b.Tanggal == "" {
 		return fiber.ErrBadRequest
 	}
 	_, err := s.pool.Exec(c.RequestCtx(),
-		`INSERT INTO attendance(student_id,tanggal,status,keterangan) VALUES($1,$2::date,$3,$4)
-		 ON CONFLICT(student_id,tanggal) DO UPDATE SET status=EXCLUDED.status,keterangan=EXCLUDED.keterangan`,
-		b.StudentID, b.Tanggal, def(b.Status, "hadir"), b.Keterangan)
+		`INSERT INTO attendance(student_id,mapel_id,tanggal,status,keterangan) VALUES($1,$2,$3::date,$4,$5)
+		 ON CONFLICT(student_id,mapel_id,tanggal) DO UPDATE SET status=EXCLUDED.status,keterangan=EXCLUDED.keterangan`,
+		b.StudentID, b.MapelID, b.Tanggal, def(b.Status, "hadir"), b.Keterangan)
 	return errOr(c, err, fiber.Map{"ok": true})
 }
 
@@ -590,8 +845,8 @@ func (s *Server) studentCheckin(c fiber.Ctx) error {
 	c.Bind().Body(&b)
 	today := time.Now().Format("2006-01-02")
 	_, err := s.pool.Exec(c.RequestCtx(),
-		`INSERT INTO attendance(student_id,tanggal,status,keterangan) VALUES($1,$2::date,'hadir',$3)
-		 ON CONFLICT(student_id,tanggal) DO NOTHING`, cl.UID, today, b.Keterangan)
+		`INSERT INTO attendance(student_id,mapel_id,tanggal,status,keterangan) VALUES($1,0,$2::date,'hadir',$3)
+		 ON CONFLICT(student_id,mapel_id,tanggal) DO NOTHING`, cl.UID, today, b.Keterangan)
 	if err != nil {
 		return err
 	}

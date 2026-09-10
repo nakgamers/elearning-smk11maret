@@ -13,17 +13,31 @@ const TABS = [
 
 export default function Guru() {
   const [tab, setTab] = useState('materi')
+  const [user] = useState(typeof window !== 'undefined' ? (() => { try { return JSON.parse(localStorage.getItem('user')) } catch { return null } })() : null)
+  const isWalas = user?.walas?.rombel_id
+
+  const tabs = isWalas
+    ? [...TABS, { id: 'walas', label: 'Walas', icon: '👥' }]
+    : TABS
+
   return (
-    <Shell tabs={TABS} active={tab} onTab={setTab}
-      title={TABS.find((t) => t.id === tab)?.label}
+    <Shell tabs={tabs} active={tab} onTab={setTab}
+      title={tabs.find((t) => t.id === tab)?.label}
       subtitle="Dashboard Guru">
       {tab === 'materi' && <Materi />}
       {tab === 'tugas' && <Tugas />}
       {tab === 'absen' && <Absen />}
       {tab === 'ujian' && <Ujian />}
       {tab === 'umum' && <Umum />}
+      {tab === 'walas' && isWalas && <Walas user={user} />}
     </Shell>
   )
+}
+
+function useRombel() {
+  const [rombel, setRombel] = useState([])
+  useEffect(() => { api.get('/rombel').then(setRombel).catch(() => {}) }, [])
+  return rombel
 }
 
 function useList(path) {
@@ -47,6 +61,7 @@ function useSubjects() {
 function Materi() {
   const { data, reload, err } = useList('/materials')
   const { subjects, cps } = useSubjects()
+  const rombel = useRombel()
   const [f, setF] = useState({ mapel_id: '', cp_id: '', judul: '', isi: '', kelas: '' })
   const [file, setFile] = useState(null)
   const [msg, setMsg] = useState('')
@@ -99,9 +114,11 @@ function Materi() {
         </div>
         <div className="grid-2">
           <div>
-            <label className="label">Kelas sasaran (kosong = semua)</label>
-            <input className="input" value={f.kelas} placeholder="cth. X TKJ 1"
-              onChange={(e) => setF({ ...f, kelas: e.target.value })} />
+            <label className="label">Rombel sasaran (kosong = semua)</label>
+            <select className="input" value={f.kelas} onChange={(e) => setF({ ...f, kelas: e.target.value })}>
+              <option value="">— semua rombel —</option>
+              {rombel.map((r) => <option key={r.id} value={r.nama}>{r.nama}</option>)}
+            </select>
           </div>
           <div>
             <label className="label">Lampiran (PDF/DOC/…)</label>
@@ -137,6 +154,7 @@ function Materi() {
 function Tugas() {
   const { data, reload, err } = useList('/assignments')
   const { subjects, cps } = useSubjects()
+  const rombel = useRombel()
   const [f, setF] = useState({ mapel_id: '', cp_id: '', judul: '', deskripsi: '', kelas: '', deadline: '', max_score: '100' })
   const [msg, setMsg] = useState('')
   const [openSub, setOpenSub] = useState(null)
@@ -195,8 +213,11 @@ function Tugas() {
         </div>
         <div className="grid-3">
           <div>
-            <label className="label">Kelas</label>
-            <input className="input" value={f.kelas} placeholder="X TKJ 1" onChange={(e) => setF({ ...f, kelas: e.target.value })} />
+            <label className="label">Rombel</label>
+            <select className="input" value={f.kelas} onChange={(e) => setF({ ...f, kelas: e.target.value })}>
+              <option value="">— semua rombel —</option>
+              {rombel.map((r) => <option key={r.id} value={r.nama}>{r.nama}</option>)}
+            </select>
           </div>
           <div>
             <label className="label">Deadline (opsional)</label>
@@ -254,17 +275,20 @@ function SubRow({ s, onSave }) {
 }
 
 function Absen() {
-  const [kelas, setKelas] = useState('X TKJ 1')
+  const rombel = useRombel()
+  const [user] = useState(typeof window !== 'undefined' ? (() => { try { return JSON.parse(localStorage.getItem('user')) } catch { return null } })() : null)
+  const mapelID = user?.mapel_id || 0
+  const [kelas, setKelas] = useState('')
   const [tanggal, setTanggal] = useState(new Date().toISOString().slice(0, 10))
-  const { data, reload } = useList(`/attendance?kelas=${encodeURIComponent(kelas)}&tanggal=${tanggal}`)
+  const { data, reload } = useList(`/attendance?kelas=${encodeURIComponent(kelas)}&tanggal=${tanggal}&mapel_id=${mapelID}`)
   const [students, setStudents] = useState([])
-  useEffect(() => { api.get(`/students?kelas=${encodeURIComponent(kelas)}`).then(setStudents).catch(() => {}) }, [kelas])
+  useEffect(() => { if (kelas) api.get(`/students?kelas=${encodeURIComponent(kelas)}`).then(setStudents).catch(() => {}) }, [kelas])
   const [busy, setBusy] = useState(false)
 
   async function setAbsen(sid, status) {
     setBusy(true)
     try {
-      await api.post('/attendance', { student_id: sid, tanggal, status })
+      await api.post('/attendance', { student_id: sid, tanggal, status, mapel_id: mapelID })
       reload()
     } finally { setBusy(false) }
   }
@@ -273,35 +297,42 @@ function Absen() {
 
   return (
     <div className="card" style={{ padding: 16 }}>
-      <div style={{ display: 'flex', gap: 10, marginBottom: 14, flexWrap: 'wrap' }}>
-        <input className="input" style={{ width: 160 }} value={kelas} placeholder="Kelas" onChange={(e) => setKelas(e.target.value)} />
-        <input className="input" style={{ width: 160 }} type="date" value={tanggal} onChange={(e) => setTanggal(e.target.value)} />
+      <div style={{ display: 'flex', gap: 10, marginBottom: 14, flexWrap: 'wrap', alignItems: 'center' }}>
+        <select className="input" style={{ width: 190 }} value={kelas} onChange={(e) => setKelas(e.target.value)}>
+          <option value="">Pilih rombel…</option>
+          {rombel.map((r) => <option key={r.id} value={r.nama}>{r.nama}</option>)}
+        </select>
+        <input className="input" style={{ width: 170 }} type="date" value={tanggal} onChange={(e) => setTanggal(e.target.value)} />
       </div>
-      <div style={{ fontWeight: 700, marginBottom: 10 }}>Rekap {kelas} — {tanggal}</div>
-      <table className="tbl">
-        <thead><tr><th>NIS</th><th>Nama</th><th>Status</th><th>Ubah</th></tr></thead>
-        <tbody>
-          {students.map((s) => {
-            const st = byNis[s.nis]?.status
-            return (
-              <tr key={s.id}>
-                <td>{s.nis}</td>
-                <td>{s.nama}</td>
-                <td>
-                  {st ? { hadir: '✅ Hadir', izin: '📝 Izin', sakit: '🤒 Sakit', alpa: '❌ Alpa' }[st] : <span style={{ color: '#94a3b8' }}>— belum tercatat</span>}
-                </td>
-                <td>
-                  <div style={{ display: 'flex', gap: 6 }}>
-                    {[['hadir', 'Hadir'], ['izin', 'Izin'], ['sakit', 'Sakit'], ['alpa', 'Alpa']].map(([v, l]) => (
-                      <button key={v} className="btn btn-ghost" disabled={busy} style={{ padding: '4px 8px', fontSize: 11.5 }} onClick={() => setAbsen(s.id, v)}>{l}</button>
-                    ))}
-                  </div>
-                </td>
-              </tr>
-            )
-          })}
-        </tbody>
-      </table>
+      {!kelas ? <div className="empty"><span className="big">🗓️</span>Pilih rombel untuk mengisi absensi.</div> : (
+        <>
+          <div style={{ fontWeight: 700, marginBottom: 10 }}>Absensi {kelas} — {tanggal}</div>
+          <table className="tbl">
+            <thead><tr><th>NIS</th><th>Nama</th><th>Status</th><th>Ubah</th></tr></thead>
+            <tbody>
+              {students.map((s) => {
+                const st = byNis[s.nis]?.status
+                return (
+                  <tr key={s.id}>
+                    <td>{s.nis}</td>
+                    <td>{s.nama}</td>
+                    <td>
+                      {st ? { hadir: '✅ Hadir', izin: '📝 Izin', sakit: '🤒 Sakit', alpa: '❌ Alpa' }[st] : <span style={{ color: '#94a3b8' }}>— belum tercatat</span>}
+                    </td>
+                    <td>
+                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                        {[['hadir', 'Hadir'], ['izin', 'Izin'], ['sakit', 'Sakit'], ['alpa', 'Alpa']].map(([v, l]) => (
+                          <button key={v} className="btn btn-ghost" disabled={busy} style={{ padding: '4px 8px', fontSize: 11.5 }} onClick={() => setAbsen(s.id, v)}>{l}</button>
+                        ))}
+                      </div>
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </>
+      )}
     </div>
   )
 }
@@ -309,6 +340,7 @@ function Absen() {
 function Ujian() {
   const { data, reload, err } = useList('/exams')
   const { subjects, cps } = useSubjects()
+  const rombel = useRombel()
   const [f, setF] = useState({ nama: '', mapel_id: '', cp_id: '', kelas: '', durasi_menit: '60', mulai_at: '', selesai_at: '', acak_soal: false })
   const [msg, setMsg] = useState('')
   const [importFor, setImportFor] = useState(null)
@@ -361,8 +393,11 @@ function Ujian() {
         </div>
         <div className="grid-3">
           <div>
-            <label className="label">Kelas</label>
-            <input className="input" value={f.kelas} placeholder="X TKJ 1" onChange={(e) => setF({ ...f, kelas: e.target.value })} />
+            <label className="label">Rombel</label>
+            <select className="input" value={f.kelas} onChange={(e) => setF({ ...f, kelas: e.target.value })}>
+              <option value="">— semua rombel —</option>
+              {rombel.map((r) => <option key={r.id} value={r.nama}>{r.nama}</option>)}
+            </select>
           </div>
           <div>
             <label className="label">Durasi (menit)</label>
@@ -442,5 +477,55 @@ function Umum() {
       {msg && <div style={{ fontSize: 14 }}>{msg}</div>}
       <button className="btn btn-primary" style={{ justifySelf: 'start' }}>Terbitkan</button>
     </form>
+  )
+}
+
+// Walas: lihat kehadiran siswa rombel yang dipegang, lintas mapel (diampu guru lain).
+const ST_ICON = { hadir: '✅', izin: '📝', sakit: '🤒', alpa: '❌' }
+function Walas({ user }) {
+  const [tanggal, setTanggal] = useState(new Date().toISOString().slice(0, 10))
+  const [data, setData] = useState(null)
+  const [err, setErr] = useState('')
+
+  useEffect(() => {
+    const rid = user?.walas?.rombel_id
+    if (!rid) return
+    api.get(`/walas/attendance?rombel_id=${rid}&tanggal=${tanggal}`).then(setData).catch((e) => setErr(e.message))
+  }, [tanggal, user])
+
+  return (
+    <div style={{ display: 'grid', gap: 14 }}>
+      <div className="card" style={{ padding: 16 }}>
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
+          <div style={{ fontWeight: 700, marginRight: 'auto' }}>Kehadiran Siswa — {data?.rombel || user?.walas?.rombel}</div>
+          <input className="input" style={{ width: 170 }} type="date" value={tanggal} onChange={(e) => setTanggal(e.target.value)} />
+        </div>
+        {err && <div>{err}</div>}
+        {!data ? <div className="empty">Memuat…</div> : (
+          data.siswa.length === 0 ? <div className="empty"><span className="big">👥</span>Belum ada siswa di rombel ini.</div> : (
+            <table className="tbl">
+              <thead>
+                <tr>
+                  <th>NIS</th><th>Nama</th>
+                  {data.mapel.map((m) => <th key={m.id}>{m.nama}</th>)}
+                </tr>
+              </thead>
+              <tbody>
+                {data.siswa.map((s) => (
+                  <tr key={s.id}>
+                    <td>{s.nis}</td>
+                    <td style={{ fontWeight: 600 }}>{s.nama}</td>
+                    {data.mapel.map((m) => {
+                      const st = s.status?.[m.nama]
+                      return <td key={m.id}>{st ? ST_ICON[st] + ' ' + ({ hadir: 'Hadir', izin: 'Izin', sakit: 'Sakit', alpa: 'Alpa' }[st]) : <span style={{ color: '#cbd5e1' }}>—</span>}</td>
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )
+        )}
+      </div>
+    </div>
   )
 }

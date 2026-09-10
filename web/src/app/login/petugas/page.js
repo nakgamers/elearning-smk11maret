@@ -17,7 +17,7 @@ export default function LoginPetugas() {
     try {
       const r = await api.login(form.username, form.password)
       if (r.user.role === 'guru') {
-        setSession(r.token, r.user)
+        setSession(r.token, { ...r.user, walas: r.walas || null })
         router.replace('/guru')
       } else if (r.user.role === 'admin') {
         setSession(r.token, r.user)

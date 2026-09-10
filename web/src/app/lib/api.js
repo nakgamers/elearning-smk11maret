@@ -56,6 +56,7 @@ async function request(path, { method = 'GET', body, form, noAuth = false } = {}
 export const api = {
   get: (p) => request(p),
   post: (p, body) => request(p, { method: 'POST', body }),
+  put: (p, body) => request(p, { method: 'PUT', body }),
   postForm: (p, form) => request(p, { method: 'POST', form }),
   del: (p) => request(p, { method: 'DELETE' }),
   login: (username, password) => request('/login', { method: 'POST', body: { username, password }, noAuth: true }),

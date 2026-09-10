@@ -45,6 +45,14 @@ CREATE TABLE IF NOT EXISTS students (
 );
 CREATE INDEX IF NOT EXISTS idx_students_kelas ON students(kelas);
 
+-- Rombongan belajar (rombel). walas_id = guru yang menjadi wali kelas.
+CREATE TABLE IF NOT EXISTS rombel (
+  id BIGSERIAL PRIMARY KEY,
+  nama TEXT UNIQUE NOT NULL,
+  walas_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS materials (
   id BIGSERIAL PRIMARY KEY,
   mapel_id BIGINT NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
@@ -89,12 +97,13 @@ CREATE TABLE IF NOT EXISTS submissions (
 CREATE TABLE IF NOT EXISTS attendance (
   id BIGSERIAL PRIMARY KEY,
   student_id BIGINT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  mapel_id BIGINT NOT NULL DEFAULT 0,
   tanggal DATE NOT NULL,
   status TEXT NOT NULL DEFAULT 'hadir' CHECK (status IN ('hadir','izin','sakit','alpa')),
   keterangan TEXT NOT NULL DEFAULT '',
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE(student_id, tanggal)
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+CREATE INDEX IF NOT EXISTS idx_attendance_kelas_tanggal ON attendance(tanggal);
 
 CREATE TABLE IF NOT EXISTS news (
   id BIGSERIAL PRIMARY KEY,
@@ -164,6 +173,30 @@ CREATE TABLE IF NOT EXISTS cheat_signals (
 func Migrate(ctx context.Context, pool *pgxpool.Pool, log *zap.Logger) error {
 	if _, err := pool.Exec(ctx, schema); err != nil {
 		return err
+	}
+	// Migrasi idempotent utk DB lama: kolom mapel_id di attendance + unique index.
+	// (CREATE TABLE IF NOT EXISTS tidak mengubah tabel yang sudah ada.)
+	migrations := []string{
+		`ALTER TABLE attendance ADD COLUMN IF NOT EXISTS mapel_id BIGINT NOT NULL DEFAULT 0`,
+		`ALTER TABLE attendance DROP CONSTRAINT IF EXISTS attendance_student_id_tanggal_key`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS attendance_student_mapel_tanggal
+		   ON attendance(student_id, mapel_id, tanggal)`,
+	}
+	for _, m := range migrations {
+		if _, err := pool.Exec(ctx, m); err != nil {
+			return err
+		}
+	}
+	// Rombel seed: jika belum ada, buat dari kelas yang sudah dipakai siswa.
+	var nr int
+	_ = pool.QueryRow(ctx, `SELECT count(*) FROM rombel`).Scan(&nr)
+	if nr == 0 {
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO rombel(nama)
+			 SELECT DISTINCT kelas FROM students WHERE kelas<>'' AND aktif
+			 ON CONFLICT(nama) DO NOTHING`); err != nil {
+			return err
+		}
 	}
 	log.Info("migrasi skema OK")
 	return nil

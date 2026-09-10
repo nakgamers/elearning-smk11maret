@@ -81,6 +81,7 @@ export default function Shell({ tabs, active, onTab, title, subtitle, children }
         <div className="topbar">
           <div className="title">{title || current?.label || ''}</div>
           <div className="who"><b>{user.nama}</b><span>{roleLabel[user.role]}</span></div>
+          <button className="btn btn-ghost btn-sm" onClick={logout}>Keluar</button>
         </div>
         <div className="content">
           <div className="animate-in" key={active}>{children}</div>
