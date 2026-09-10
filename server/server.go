@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -99,11 +101,11 @@ func NewApp(cfg Config, pool *pgxpool.Pool, cache Cache, log *zap.Logger) *fiber
 	api.Get("/my/attempts/:id/hasil", siswa, s.attemptResult)
 	api.Post("/cheat-signals", siswa, s.logCheatSignal) // dari perangkat Android siswa
 
-	// File hasil upload (materi/tugas) disajikan statis
-	app.Get("/uploads/*", func(c fiber.Ctx) error {
-		p := strings.TrimPrefix(c.Path(), "/uploads/")
-		return c.SendFile(filepath.Join(s.cfg.UploadDir, filepath.Base(p)))
-	})
+	// File hasil upload (materi/tugas) disajikan statis dgn header aman.
+	// - Content-Type eksplisit dari ekstensi (JANGAN sniff ke text/html).
+	// - X-Content-Type-Options: nosniff + CSP sandbox mencegah XSS via file upload.
+	// - Gambar/PDF/video: inline (bisa dilihat tanpa download); sisanya attachment.
+	app.Get("/uploads/*", s.serveUpload)
 
 	return app
 }
@@ -807,7 +809,7 @@ func (s *Server) exportGrades(c fiber.Ctx) error {
 // ---------- attendance ----------
 
 func (s *Server) listAttendance(c fiber.Ctx) error {
-	q := `SELECT a.id,st.nis,st.nama,st.kelas,a.tanggal,a.status,a.keterangan,a.mapel_id,COALESCE(sb.nama,'')
+	q := `SELECT a.id,a.student_id,st.nis,st.nama,st.kelas,a.tanggal,a.status,a.keterangan,a.mapel_id,COALESCE(sb.nama,'')
 	      FROM attendance a JOIN students st ON st.id=a.student_id
 	      LEFT JOIN subjects sb ON sb.id=a.mapel_id WHERE TRUE`
 	args := []any{}
@@ -819,25 +821,49 @@ func (s *Server) listAttendance(c fiber.Ctx) error {
 		args = append(args, t)
 		q += fmt.Sprintf(" AND a.tanggal=$%d::date", len(args))
 	}
-	if m := c.Query("mapel_id"); m != "" {
-		args = append(args, m)
-		q += fmt.Sprintf(" AND a.mapel_id=$%d", len(args))
+	hasMapel := c.Query("mapel_id") != ""
+	if hasMapel {
+		args = append(args, c.Query("mapel_id"))
+		// Sertakan checkin global (mapel_id=0) sebagai fallback kehadiran mandiri siswa.
+		q += fmt.Sprintf(" AND (a.mapel_id=$%d OR a.mapel_id=0)", len(args))
 	}
-	q += " ORDER BY a.tanggal DESC,st.nis LIMIT 500"
+	q += " ORDER BY a.tanggal DESC,st.nis LIMIT 1000"
 	rows, err := s.pool.Query(c.RequestCtx(), q, args...)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
+
+	// Rekonsiliasi saat filter mapel aktif: baris mapel khusus mengalahkan
+	// checkin global (mapel_id=0) untuk siswa yang sama, agar absen mandiri
+	// siswa tetap terlihat oleh guru tanpa menimpa status per-mapel guru.
 	out := []fiber.Map{}
+	idx := map[int64]int{} // student_id -> posisi di out
 	for rows.Next() {
-		var id, mid int64
+		var id, sid, mid int64
 		var nis, nama, kelas, status, ket, mapel string
 		var tgl time.Time
-		rows.Scan(&id, &nis, &nama, &kelas, &tgl, &status, &ket, &mid, &mapel)
-		out = append(out, fiber.Map{"id": id, "nis": nis, "nama": nama, "kelas": kelas,
+		if err := rows.Scan(&id, &sid, &nis, &nama, &kelas, &tgl, &status, &ket, &mid, &mapel); err != nil {
+			return err
+		}
+		rec := fiber.Map{"id": id, "nis": nis, "nama": nama, "kelas": kelas,
 			"tanggal": tgl.Format("2006-01-02"), "status": status, "keterangan": ket,
-			"mapel_id": mid, "mapel": mapel})
+			"mapel_id": mid, "mapel": mapel}
+		if !hasMapel {
+			out = append(out, rec)
+			continue
+		}
+		if mid != 0 {
+			if i, ok := idx[sid]; ok {
+				out[i] = rec
+			} else {
+				idx[sid] = len(out)
+				out = append(out, rec)
+			}
+		} else if _, ok := idx[sid]; !ok {
+			idx[sid] = len(out)
+			out = append(out, rec)
+		}
 	}
 	return c.JSON(out)
 }
@@ -1488,6 +1514,97 @@ func (s *Server) attemptResult(c fiber.Ctx) error {
 
 // ---------- util ----------
 
+// uploadMeta memetakan ekstensi file upload → Content-Type + mode tampil (inline/attachment).
+func uploadMeta(name string) (ctype string, inline bool) {
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".png":
+		return "image/png", true
+	case ".jpg", ".jpeg":
+		return "image/jpeg", true
+	case ".pdf":
+		return "application/pdf", true
+	case ".mp4":
+		return "video/mp4", true
+	case ".zip":
+		return "application/zip", false
+	case ".rar":
+		return "application/x-rar-compressed", false
+	case ".doc":
+		return "application/msword", false
+	case ".docx":
+		return "application/vnd.openxmlformats-officedocument.wordprocessingml.document", false
+	case ".xls":
+		return "application/vnd.ms-excel", false
+	case ".xlsx":
+		return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", false
+	case ".ppt":
+		return "application/vnd.ms-powerpoint", false
+	case ".pptx":
+		return "application/vnd.openxmlformats-officedocument.presentationml.presentation", false
+	default:
+		return "application/octet-stream", false
+	}
+}
+
+// serveUpload menyajikan file upload dgn header aman:
+// nosniff (JANGAN sniff ulang MIME), disposition inline utk gambar/PDF/video
+// supaya bisa dilihat langsung tanpa download, dan CSP sandbox utk file unduhan.
+func (s *Server) serveUpload(c fiber.Ctx) error {
+	name := filepath.Base(strings.TrimPrefix(c.Path(), "/uploads/"))
+	ctype, inline := uploadMeta(name)
+	c.Set("X-Content-Type-Options", "nosniff")
+	if inline {
+		c.Set("Content-Type", ctype)
+		c.Set("Content-Disposition", `inline; filename="`+name+`"`)
+	} else {
+		c.Set("Content-Type", ctype)
+		c.Set("Content-Disposition", `attachment; filename="`+name+`"`)
+		c.Set("Content-Security-Policy", "default-src 'none'; sandbox")
+	}
+	return c.SendFile(filepath.Join(s.cfg.UploadDir, name))
+}
+
+// sniffFileType membaca header file utk memastikan isi cocok dgn ekstensi & bukan skrip/shell.
+func sniffFileType(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	buf := make([]byte, 512)
+	n, _ := io.ReadFull(f, buf)
+	if n == 0 {
+		return "application/octet-stream"
+	}
+	return http.DetectContentType(buf[:n])
+}
+
+// validateUploadFile menolak file berbahaya: skrip/html/svg/eksekutabel yang
+// menyamar dgn ekstensi diizinkan (pertahanan terhadap upload shell/polyglot).
+func validateUploadFile(path, ext string) error {
+	ct := sniffFileType(path)
+	lower := strings.ToLower(ct)
+	if strings.HasPrefix(lower, "text/") || strings.Contains(lower, "javascript") ||
+		strings.Contains(lower, "html") || strings.Contains(lower, "svg") ||
+		strings.Contains(lower, "php") || strings.Contains(lower, "shell") ||
+		strings.Contains(lower, "x-sh") || strings.Contains(lower, "x-msdownload") ||
+		strings.Contains(lower, "dosexec") || strings.Contains(lower, "elf") {
+		return fmt.Errorf("isi file mencurigakan (%s); upload ditolak", ct)
+	}
+	// Gambar & PDF: isi wajib cocok tipe, mencegah non-gambar menyamar jadi gambar.
+	switch ext {
+	case ".png", ".jpg", ".jpeg":
+		if !strings.HasPrefix(lower, "image/") {
+			return fmt.Errorf("file bukan gambar valid (%s)", ct)
+		}
+	case ".pdf":
+		if !strings.Contains(lower, "pdf") {
+			return fmt.Errorf("file bukan PDF valid (%s)", ct)
+		}
+	}
+	return nil
+}
+
 func (s *Server) saveUpload(c fiber.Ctx, field string) (string, error) {
 	fh, err := c.FormFile(field)
 	if err != nil {
@@ -1504,7 +1621,13 @@ func (s *Server) saveUpload(c fiber.Ctx, field string) (string, error) {
 		return "", fmt.Errorf("tipe file %s tidak diizinkan", ext)
 	}
 	name := randHex(12) + ext
-	if err := c.SaveFile(fh, filepath.Join(s.cfg.UploadDir, name)); err != nil {
+	dst := filepath.Join(s.cfg.UploadDir, name)
+	if err := c.SaveFile(fh, dst); err != nil {
+		return "", err
+	}
+	// Validasi isi (magic bytes) → cegah file shell/HTML/polyglot menyamar.
+	if err := validateUploadFile(dst, ext); err != nil {
+		os.Remove(dst)
 		return "", err
 	}
 	return "/uploads/" + name, nil

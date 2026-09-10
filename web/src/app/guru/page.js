@@ -260,54 +260,77 @@ function Tugas() {
 }
 
 const IMG_EXT = /\.(png|jpe?g|gif|webp|bmp|svg)$/i
+const PDF_EXT = /\.pdf$/i
+const VID_EXT = /\.(mp4|mp3|webm)$/i
+
+function fileKind(url) {
+  if (!url) return 'none'
+  if (IMG_EXT.test(url)) return 'img'
+  if (PDF_EXT.test(url)) return 'pdf'
+  if (VID_EXT.test(url)) return 'video'
+  return 'doc'
+}
+
+function PreviewModal({ url, type, nama, onClose }) {
+  return (
+    <div onClick={onClose} role="dialog" aria-modal="true" aria-label="Pratinjau file"
+      style={{ position: 'fixed', inset: 0, zIndex: 110, background: 'rgba(2,6,23,.92)', display: 'grid', placeItems: 'center', padding: 20, cursor: 'zoom-out' }}>
+      <div onClick={(e) => e.stopPropagation()}
+        style={{ width: 'min(96vw, 1100px)', height: '90vh', display: 'grid', placeItems: 'center', position: 'relative', cursor: 'default' }}>
+        <button onClick={onClose} style={{ position: 'absolute', top: 0, right: 0, zIndex: 3, background: '#fff', color: '#0f172a', border: 'none', borderRadius: 8, padding: '8px 14px', fontWeight: 700, cursor: 'pointer' }}>✕ Tutup</button>
+        {type === 'img' && <img src={url} alt={`Kumpulan ${nama}`} style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain', borderRadius: 10, background: '#fff' }} />}
+        {type === 'pdf' && <iframe src={url} title={`Kumpulan ${nama}`} style={{ width: '100%', height: '100%', border: 'none', borderRadius: 10, background: '#fff' }} />}
+        {type === 'video' && <video src={url} controls autoPlay style={{ maxWidth: '100%', maxHeight: '100%', borderRadius: 10, background: '#000' }} />}
+      </div>
+    </div>
+  )
+}
 
 function SubRow({ s, onSave }) {
   const [nilai, setNilai] = useState(s.nilai ?? '')
   const [fb, setFb] = useState(s.feedback ?? '')
-  const [zoom, setZoom] = useState(false)
-  const isImg = !!s.file_url && IMG_EXT.test(s.file_url)
+  const [preview, setPreview] = useState(null)
   useEffect(() => {
-    if (!zoom) return
-    const h = (e) => { if (e.key === 'Escape') setZoom(false) }
+    if (!preview) return
+    const h = (e) => { if (e.key === 'Escape') setPreview(null) }
     window.addEventListener('keydown', h)
     return () => window.removeEventListener('keydown', h)
-  }, [zoom])
+  }, [preview])
+  const kind = fileKind(s.file_url)
   return (
     <tr>
       <td>{s.nis}</td>
       <td>{s.nama}</td>
       <td style={{ maxWidth: 280 }}>
         {s.jawaban && <div style={{ whiteSpace: 'pre-wrap', marginBottom: s.file_url ? 6 : 0 }}>{s.jawaban}</div>}
-        {isImg && (
-          <>
+        {kind === 'img' && (
+          <div>
             <img
               src={s.file_url}
               alt={`Kumpulan ${s.nama}`}
               title="Klik untuk memperbesar"
               loading="lazy"
-              onClick={() => setZoom(true)}
+              onClick={() => setPreview({ url: s.file_url, type: 'img' })}
               style={{ maxWidth: 160, maxHeight: 120, borderRadius: 8, border: '1px solid #e2e8f0', cursor: 'zoom-in', display: 'block' }}
             />
-            {zoom && (
-              <div
-                onClick={() => setZoom(false)}
-                role="dialog"
-                aria-modal="true"
-                aria-label="Pratinjau gambar"
-                style={{ position: 'fixed', inset: 0, zIndex: 100, background: 'rgba(2,6,23,.9)', display: 'grid', placeItems: 'center', padding: 16, cursor: 'zoom-out' }}
-              >
-                <img src={s.file_url} alt={`Kumpulan ${s.nama} (diperbesar)`}
-                  style={{ maxWidth: '94vw', maxHeight: '86vh', objectFit: 'contain', borderRadius: 12 }} />
-              </div>
-            )}
-          </>
+            <button className="btn btn-ghost" style={{ padding: '2px 8px', fontSize: 11, marginTop: 4 }} onClick={() => setPreview({ url: s.file_url, type: 'img' })}>Lihat</button>
+          </div>
         )}
-        {s.file_url && !isImg && <a href={s.file_url} target="_blank" rel="noreferrer">📎 Buka dokumen</a>}
-        {!s.jawaban && !s.file_url && '—'}
+        {kind === 'pdf' && (
+          <button className="btn btn-ghost" style={{ padding: '4px 10px', fontSize: 12 }} onClick={() => setPreview({ url: s.file_url, type: 'pdf' })}>📄 Lihat PDF</button>
+        )}
+        {kind === 'video' && (
+          <button className="btn btn-ghost" style={{ padding: '4px 10px', fontSize: 12 }} onClick={() => setPreview({ url: s.file_url, type: 'video' })}>🎬 Lihat video</button>
+        )}
+        {kind === 'doc' && (
+          <a href={s.file_url} target="_blank" rel="noreferrer">📎 Buka dokumen</a>
+        )}
+        {kind === 'none' && !s.jawaban && '—'}
       </td>
       <td><input className="input" style={{ width: 70, padding: '4px 8px' }} type="number" value={nilai} onChange={(e) => setNilai(e.target.value)} /></td>
       <td><input className="input" style={{ width: 150, padding: '4px 8px' }} value={fb} onChange={(e) => setFb(e.target.value)} /></td>
       <td><button className="btn btn-primary" style={{ padding: '4px 10px', fontSize: 12 }} onClick={() => onSave(s.id, nilai, fb)}>Simpan</button></td>
+      {preview && <PreviewModal url={preview.url} type={preview.type} nama={s.nama} onClose={() => setPreview(null)} />}
     </tr>
   )
 }
