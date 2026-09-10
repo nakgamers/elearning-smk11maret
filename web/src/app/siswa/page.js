@@ -224,6 +224,18 @@ function Ujian({ goExam }) {
 function Absen() {
   const [state, setState] = useState({ msg: '', ok: false, busy: false })
   const today = new Date().toLocaleDateString('id-ID', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })
+  // Cek status kehadiran hari ini → kalau sudah absen, tombol langsung nonaktif (tidak bisa ulang).
+  useEffect(() => {
+    let on = true
+    api.get('/attendance/my/today')
+      .then((r) => {
+        if (on && r && r.attended) {
+          setState((s) => ({ ...s, ok: true, msg: '✅ Anda sudah tercatat hadir hari ini.' }))
+        }
+      })
+      .catch(() => {})
+    return () => { on = false }
+  }, [])
   async function checkin() {
     setState({ ...state, busy: true, msg: '' })
     try {
@@ -239,7 +251,7 @@ function Absen() {
       <div style={{ fontSize: 16, fontWeight: 700, marginTop: 6 }}>{today}</div>
       <p style={{ color: '#64748b', fontSize: 14 }}>Presensi kehadiran harian</p>
       <button className="btn btn-primary" style={{ marginTop: 12 }} disabled={state.busy || state.ok} onClick={checkin}>
-        {state.ok ? 'Sudah hadir' : 'Hadir sekarang'}
+        {state.ok ? 'Sudah hadir' : state.busy ? 'Menyimpan…' : 'Hadir sekarang'}
       </button>
       {state.msg && <p style={{ marginTop: 12, fontSize: 14 }}>{state.msg}</p>}
     </div>

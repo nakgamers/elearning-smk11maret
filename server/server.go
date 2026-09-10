@@ -91,6 +91,7 @@ func NewApp(cfg Config, pool *pgxpool.Pool, cache Cache, log *zap.Logger) *fiber
 	api.Get("/my/assignments", siswa, s.studentAssignments)
 	api.Post("/submissions", siswa, s.submitAssignment)
 	api.Post("/attendance/checkin", siswa, s.studentCheckin)
+	api.Get("/attendance/my/today", siswa, s.studentAttendanceToday)
 	api.Get("/my/exams", siswa, s.studentExams)
 	api.Post("/exams/:id/start", siswa, s.startExam)
 	api.Post("/attempts/:id/answers", siswa, s.syncAnswers) // batch, idempotent
@@ -867,6 +868,7 @@ func (s *Server) studentCheckin(c fiber.Ctx) error {
 	}
 	c.Bind().Body(&b)
 	today := time.Now().Format("2006-01-02")
+	// Idempotent: baris (student,mapel,tanggal) unik; klik ganda tidak akan menggandakan absen.
 	_, err := s.pool.Exec(c.RequestCtx(),
 		`INSERT INTO attendance(student_id,mapel_id,tanggal,status,keterangan) VALUES($1,0,$2::date,'hadir',$3)
 		 ON CONFLICT(student_id,mapel_id,tanggal) DO NOTHING`, cl.UID, today, b.Keterangan)
@@ -874,6 +876,20 @@ func (s *Server) studentCheckin(c fiber.Ctx) error {
 		return err
 	}
 	return c.JSON(fiber.Map{"ok": true, "tanggal": today})
+}
+
+// Status kehadiran siswa HARI INI → dipakai UI utk men-disable tombol "Hadir sekarang".
+func (s *Server) studentAttendanceToday(c fiber.Ctx) error {
+	cl := claimsOf(c)
+	today := time.Now().Format("2006-01-02")
+	var attended bool
+	err := s.pool.QueryRow(c.RequestCtx(),
+		`SELECT EXISTS(SELECT 1 FROM attendance WHERE student_id=$1 AND tanggal=$2::date)`,
+		cl.UID, today).Scan(&attended)
+	if err != nil {
+		return err
+	}
+	return c.JSON(fiber.Map{"attended": attended, "tanggal": today})
 }
 
 // ---------- news ----------
