@@ -343,15 +343,26 @@ function Absen() {
   const [tanggal, setTanggal] = useState(new Date().toISOString().slice(0, 10))
   const { data, reload } = useList(`/attendance?kelas=${encodeURIComponent(kelas)}&tanggal=${tanggal}&mapel_id=${mapelID}`)
   const [students, setStudents] = useState([])
+  const [exporting, setExporting] = useState(false)
   useEffect(() => { if (kelas) api.get(`/students?kelas=${encodeURIComponent(kelas)}`).then(setStudents).catch(() => {}) }, [kelas])
   const [busy, setBusy] = useState(false)
 
+  const summary = students.reduce((acc, s) => {
+    const status = data.find((a) => a.nis === s.nis)?.status || 'belum'
+    acc[status] = (acc[status] || 0) + 1
+    return acc
+  }, { hadir: 0, alpa: 0, izin: 0, sakit: 0, belum: 0 })
+
   async function setAbsen(sid, status) {
     setBusy(true)
-    try {
-      await api.post('/attendance', { student_id: sid, tanggal, status, mapel_id: mapelID })
-      reload()
-    } finally { setBusy(false) }
+    try { await api.post('/attendance', { student_id: sid, tanggal, status, mapel_id: mapelID }); reload() }
+    finally { setBusy(false) }
+  }
+
+  async function exportPDF() {
+    setExporting(true)
+    try { await api.download(`/attendance/export.pdf?kelas=${encodeURIComponent(kelas)}&tanggal=${tanggal}&mapel_id=${mapelID}`) }
+    finally { setExporting(false) }
   }
 
   const byNis = Object.fromEntries(data.map((a) => [a.nis, a]))
@@ -364,7 +375,20 @@ function Absen() {
           {rombel.map((r) => <option key={r.id} value={r.nama}>{r.nama}</option>)}
         </select>
         <input className="input" style={{ width: 170 }} type="date" value={tanggal} onChange={(e) => setTanggal(e.target.value)} />
+        <button className="btn btn-primary" disabled={!kelas || exporting} onClick={exportPDF}>
+          {exporting ? 'Menyiapkan PDF…' : '⬇ Export PDF'}
+        </button>
       </div>
+      {kelas && <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 14 }}>
+        {[
+          ['hadir', '✅ Hadir', '#dcfce7', '#166534'],
+          ['alpa', '❌ Alpa', '#fee2e2', '#991b1b'],
+          ['izin', '📝 Izin', '#fef3c7', '#92400e'],
+          ['sakit', '🤒 Sakit', '#dbeafe', '#1e40af'],
+          ['belum', '⏳ Belum absen', '#f1f5f9', '#475569'],
+        ].map(([key, label, bg, color]) => <span key={key} className="badge" style={{ background: bg, color }}><b>{summary[key] || 0}</b> {label}</span>)}
+        <span className="badge" style={{ background: '#ede9fe', color: '#5b21b6' }}><b>{students.length}</b> Total</span>
+      </div>}
       {!kelas ? <div className="empty"><span className="big">🗓️</span>Pilih rombel untuk mengisi absensi.</div> : (
         <>
           <div style={{ fontWeight: 700, marginBottom: 10 }}>Absensi {kelas} — {tanggal}</div>
@@ -375,18 +399,11 @@ function Absen() {
                 const st = byNis[s.nis]?.status
                 return (
                   <tr key={s.id}>
-                    <td>{s.nis}</td>
-                    <td>{s.nama}</td>
-                    <td>
-                      {st ? { hadir: '✅ Hadir', izin: '📝 Izin', sakit: '🤒 Sakit', alpa: '❌ Alpa' }[st] : <span style={{ color: '#94a3b8' }}>— belum tercatat</span>}
-                    </td>
-                    <td>
-                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                        {[['hadir', 'Hadir'], ['izin', 'Izin'], ['sakit', 'Sakit'], ['alpa', 'Alpa']].map(([v, l]) => (
-                          <button key={v} className="btn btn-ghost" disabled={busy} style={{ padding: '4px 8px', fontSize: 11.5 }} onClick={() => setAbsen(s.id, v)}>{l}</button>
-                        ))}
-                      </div>
-                    </td>
+                    <td>{s.nis}</td><td>{s.nama}</td>
+                    <td>{st ? { hadir: '✅ Hadir', izin: '📝 Izin', sakit: '🤒 Sakit', alpa: '❌ Alpa' }[st] : <span style={{ color: '#94a3b8' }}>— belum tercatat</span>}</td>
+                    <td><div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                      {[['hadir', 'Hadir'], ['izin', 'Izin'], ['sakit', 'Sakit'], ['alpa', 'Alpa']].map(([v, l]) => <button key={v} className="btn btn-ghost" disabled={busy} style={{ padding: '4px 8px', fontSize: 11.5 }} onClick={() => setAbsen(s.id, v)}>{l}</button>)}
+                    </div></td>
                   </tr>
                 )
               })}

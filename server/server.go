@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -79,6 +80,7 @@ func NewApp(cfg Config, pool *pgxpool.Pool, cache Cache, log *zap.Logger) *fiber
 	api.Post("/submissions/:id/grade", adminGuru, s.gradeSubmission)
 	api.Get("/grades/export", adminGuru, s.exportGrades)
 	api.Get("/attendance", adminGuru, s.listAttendance)
+	api.Get("/attendance/export.pdf", adminGuru, s.exportAttendancePDF)
 	api.Post("/attendance", adminGuru, s.setAttendance)
 	api.Post("/news", adminGuru, s.createNews)
 	api.Post("/news/:id/toggle", adminGuru, s.toggleNews)
@@ -866,6 +868,131 @@ func (s *Server) listAttendance(c fiber.Ctx) error {
 		}
 	}
 	return c.JSON(out)
+}
+
+// exportAttendancePDF membuat rekap absensi harian sederhana tanpa dependency
+// eksternal. Data diambil dari students LEFT JOIN attendance sehingga siswa yang
+// belum absen tetap masuk laporan dan dihitung sebagai "Belum absen".
+func (s *Server) exportAttendancePDF(c fiber.Ctx) error {
+	kelas := c.Query("kelas")
+	tanggal := c.Query("tanggal")
+	if tanggal == "" {
+		tanggal = time.Now().Format("2006-01-02")
+	}
+	mapelID, _ := strconv.ParseInt(c.Query("mapel_id"), 10, 64)
+	ctx := c.RequestCtx()
+
+	q := `SELECT st.nis,st.nama,COALESCE(a.status,''),COALESCE(a.keterangan,'')
+	      FROM students st
+	      LEFT JOIN LATERAL (
+		      SELECT a1.status,a1.keterangan
+		      FROM attendance a1
+		      WHERE a1.student_id=st.id AND a1.tanggal=$1::date
+		        AND ($2=0 OR a1.mapel_id=$2 OR a1.mapel_id=0)
+		      ORDER BY CASE WHEN $2<>0 AND a1.mapel_id=$2 THEN 0 ELSE 1 END, a1.id DESC
+		      LIMIT 1
+	      ) a ON TRUE
+	      WHERE st.aktif AND ($3='' OR st.kelas=$3)
+	      ORDER BY st.nis`
+	rows, err := s.pool.Query(ctx, q, tanggal, mapelID, kelas)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	type attendanceRow struct{ nis, nama, status, ket string }
+	items := []attendanceRow{}
+	counts := map[string]int{"hadir": 0, "alpa": 0, "izin": 0, "sakit": 0, "belum": 0}
+	for rows.Next() {
+		var r attendanceRow
+		if err := rows.Scan(&r.nis, &r.nama, &r.status, &r.ket); err != nil {
+			return err
+		}
+		if r.status == "" {
+			r.status = "belum"
+		}
+		counts[r.status]++
+		items = append(items, r)
+	}
+
+	pdf := newAttendancePDF("SMK 11 MARET - REKAP ABSENSI")
+	pdf.heading(fmt.Sprintf("Tanggal: %s    Rombel: %s", tanggal, def(kelas, "Semua rombel")))
+	pdf.heading(fmt.Sprintf("Hadir: %d    Alpa: %d    Izin: %d    Sakit: %d    Belum absen: %d    Total: %d",
+		counts["hadir"], counts["alpa"], counts["izin"], counts["sakit"], counts["belum"], len(items)))
+	pdf.tableHeader()
+	for i, r := range items {
+		if i > 0 && i%38 == 0 {
+			pdf.page()
+			pdf.heading("SMK 11 MARET - REKAP ABSENSI (lanjutan)")
+			pdf.tableHeader()
+		}
+		pdf.row(i+1, r.nis, r.nama, attendanceLabel(r.status), r.ket)
+	}
+	body := pdf.finish()
+	name := fmt.Sprintf("absensi-%s.pdf", strings.ReplaceAll(tanggal, "-", ""))
+	c.Set("Content-Type", "application/pdf")
+	c.Set("Content-Disposition", `attachment; filename="`+name+`"`)
+	return c.Send(body)
+}
+
+func attendanceLabel(status string) string {
+	return map[string]string{"hadir": "Hadir", "alpa": "Alpa", "izin": "Izin", "sakit": "Sakit", "belum": "Belum absen"}[status]
+}
+
+type attendancePDF struct {
+	pages [][]string
+	cur []string
+}
+
+func newAttendancePDF(title string) *attendancePDF {
+	p := &attendancePDF{}
+	p.page()
+	p.heading(title)
+	return p
+}
+func (p *attendancePDF) page() {
+	if len(p.cur) > 0 { p.pages = append(p.pages, p.cur) }
+	p.cur = []string{"BT /F1 10 Tf 42 555 Td"}
+}
+func pdfText(s string) string {
+	s = strings.Map(func(r rune) rune { if r < 32 || r > 126 { return '?' }; return r }, s)
+	s = strings.ReplaceAll(s, `\\`, `\\\\`)
+	s = strings.ReplaceAll(s, `(`, `\\(`)
+	s = strings.ReplaceAll(s, `)`, `\\)`)
+	return s
+}
+func (p *attendancePDF) heading(text string) {
+	p.cur = append(p.cur, fmt.Sprintf("(%s) Tj 0 -16 Td", pdfText(text)))
+}
+func (p *attendancePDF) tableHeader() {
+	p.cur = append(p.cur, "0 -18 Td (No) Tj 35 0 Td (NIS) Tj 85 0 Td (Nama siswa) Tj 245 0 Td (Status) Tj 90 0 Td (Keterangan) Tj 0 -13 Td")
+}
+func (p *attendancePDF) row(no int, nis, nama, status, ket string) {
+	p.cur = append(p.cur, fmt.Sprintf("(%d) Tj 35 0 Td (%s) Tj 85 0 Td (%s) Tj 245 0 Td (%s) Tj 90 0 Td (%s) Tj 0 -13 Td", no, pdfText(nis), pdfText(nama), pdfText(status), pdfText(ket)))
+}
+func (p *attendancePDF) finish() []byte {
+	if len(p.cur) > 0 { p.pages = append(p.pages, p.cur) }
+	var out bytes.Buffer
+	out.WriteString("%PDF-1.4\n")
+	offsets := []int{0}
+	writeObj := func(n int, body string) { offsets = append(offsets, out.Len()); fmt.Fprintf(&out, "%d 0 obj\n%s\nendobj\n", n, body) }
+	pageNums, contentNums := []int{}, []int{}
+	for i := range p.pages { pageNums = append(pageNums, 3+i*2); contentNums = append(contentNums, 4+i*2) }
+	kids := ""
+	for _, n := range pageNums { kids += fmt.Sprintf("%d 0 R ", n) }
+	writeObj(1, "<< /Type /Catalog /Pages 2 0 R >>")
+	writeObj(2, fmt.Sprintf("<< /Type /Pages /Kids [%s] /Count %d >>", kids, len(pageNums)))
+	for i, lines := range p.pages {
+		writeObj(pageNums[i], "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 612] /Resources << /Font << /F1 "+fmt.Sprintf("%d 0 R", 3+len(p.pages)*2)+" >> >> /Contents "+fmt.Sprintf("%d 0 R", contentNums[i])+" >>")
+		stream := "BT /F1 10 Tf " + strings.Join(lines, " ") + " ET"
+		writeObj(contentNums[i], fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(stream), stream))
+	}
+	fontNum := 3 + len(p.pages)*2
+	writeObj(fontNum, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+	xref := out.Len()
+	fmt.Fprintf(&out, "xref\n0 %d\n0000000000 65535 f \n", fontNum+1)
+	for i := 1; i <= fontNum; i++ { fmt.Fprintf(&out, "%010d 00000 n \n", offsets[i]) }
+	fmt.Fprintf(&out, "trailer << /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF", fontNum+1, xref)
+	return out.Bytes()
 }
 
 // Set absen manual oleh guru/admin (bulk per siswa, per mapel).
