@@ -967,7 +967,10 @@ func (p *attendancePDF) tableHeader() {
 	p.cur = append(p.cur, "0 -18 Td (No) Tj 35 0 Td (NIS) Tj 85 0 Td (Nama siswa) Tj 245 0 Td (Status) Tj 90 0 Td (Keterangan) Tj 0 -13 Td")
 }
 func (p *attendancePDF) row(no int, nis, nama, status, ket string) {
-	p.cur = append(p.cur, fmt.Sprintf("(%d) Tj 35 0 Td (%s) Tj 85 0 Td (%s) Tj 245 0 Td (%s) Tj 90 0 Td (%s) Tj 0 -13 Td", no, pdfText(nis), pdfText(nama), pdfText(status), pdfText(ket)))
+	// Setelah kolom keterangan, posisi X berada di sekitar 497. Kembalikan
+	// ke kolom No (42) setiap baris; tanpa reset ini baris berikutnya bergeser
+	// ke kanan sampai keluar halaman sehingga PDF tampak hanya berisi header.
+	p.cur = append(p.cur, fmt.Sprintf("-455 0 Td (%d) Tj 35 0 Td (%s) Tj 85 0 Td (%s) Tj 245 0 Td (%s) Tj 90 0 Td (%s) Tj 0 -13 Td", no, pdfText(nis), pdfText(nama), pdfText(status), pdfText(ket)))
 }
 func (p *attendancePDF) finish() []byte {
 	if len(p.cur) > 0 { p.pages = append(p.pages, p.cur) }
