@@ -449,6 +449,7 @@ func (s *Server) importStudents(c fiber.Ctx) error {
 	pw, _ := HashPassword("siswa123") // password default, siswa ganti lewat admin
 	imported, skipped := 0, 0
 	ctx := c.RequestCtx()
+	seen := []string{}
 	for _, r := range xl {
 		if len(r) < 3 || r[0] == "" || r[1] == "" {
 			continue
@@ -460,14 +461,21 @@ func (s *Server) importStudents(c fiber.Ctx) error {
 			skipped++
 			continue
 		}
+		seen = append(seen, r[0])
 		imported++
+	}
+	// Sync penuh menonaktifkan siswa lama yang tidak ada di sumber, bukan menghapusnya.
+	if c.Query("sync") == "1" && len(seen) > 0 {
+		if _, err := s.pool.Exec(ctx, `UPDATE students SET aktif=FALSE WHERE NOT (nis = ANY($1::text[]))`, seen); err != nil {
+			return err
+		}
 	}
 	// Sinkronkan rombel dari kelas yang diimpor.
 	if _, err := s.pool.Exec(ctx,
 		`INSERT INTO rombel(nama) SELECT DISTINCT kelas FROM students WHERE kelas<>'' AND aktif ON CONFLICT(nama) DO NOTHING`); err != nil {
 		return err
 	}
-	return c.JSON(fiber.Map{"imported": imported, "skipped": skipped})
+	return c.JSON(fiber.Map{"imported": imported, "skipped": skipped, "sync": c.Query("sync") == "1"})
 }
 
 func (s *Server) deleteStudent(c fiber.Ctx) error {
