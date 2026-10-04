@@ -173,7 +173,7 @@ func (s *Server) resolveAI(c fiber.Ctx, provider string) (aiConf, error) {
 	case "server":
 		ac := aiConf{baseURL: s.cfg.AIBaseURL, apiKey: s.cfg.AIAPIKey, model: s.cfg.AIModel}
 		if ac.baseURL == "" || ac.apiKey == "" || ac.model == "" {
-			return ac, fmt.Errorf("AI sekolah belum dikonfigurasi. Minta admin mengisi AI_BASE_URL, AI_API_KEY, dan AI_MODEL — atau gunakan Gemini pribadi.")
+			return ac, fmt.Errorf("Quineilla belum dikonfigurasi. Minta admin mengisi AI_BASE_URL, AI_API_KEY, dan AI_MODEL — atau gunakan Gemini pribadi.")
 		}
 		return ac, nil
 	case "gemini":

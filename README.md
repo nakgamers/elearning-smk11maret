@@ -65,7 +65,7 @@ siswa contoh NIS `24001/siswa123` (password siswa default saat import = `siswa12
 
 Guru memilih salah satu saat membuat kuis:
 
-1. **🏫 AI Sekolah** — via env server (konsep proxy ala 9Router: guru tidak
+1. **✨ Quineilla** — AI asisten guru, via env server (konsep proxy ala 9Router: guru tidak
    perlu kunci sendiri):
    ```bash
    AI_BASE_URL="https://..."   # endpoint OpenAI-compatible (mis. 9Router)

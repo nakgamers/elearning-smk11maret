@@ -818,7 +818,7 @@ function KuisAI() {
             <div className="btn-row">
               <button className={'btn btn-sm ' + (provider === 'server' ? 'btn-ok' : 'btn-ghost')}
                 onClick={() => setProvider('server')}>
-                🏫 AI Sekolah{!aiStatus.server && ' (belum aktif)'}
+                ✨ Quineilla{!aiStatus.server && ' (belum aktif)'}
               </button>
               <button className={'btn btn-sm ' + (provider === 'gemini' ? 'btn-ok' : 'btn-ghost')}
                 onClick={() => setProvider('gemini')}>
@@ -853,7 +853,7 @@ function KuisAI() {
           )}
           {provider === 'server' && !aiStatus.server && (
             <div className="alert alert-warn">
-              AI sekolah belum dikonfigurasi admin. Pakai <b>🔑 Gemini saya</b> di atas,
+              <b>✨ Quineilla</b> belum dikonfigurasi admin. Pakai <b>🔑 Gemini saya</b> di atas,
               atau minta admin mengisi AI_BASE_URL / AI_API_KEY / AI_MODEL di server.
             </div>
           )}
