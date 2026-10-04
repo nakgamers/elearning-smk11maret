@@ -88,6 +88,9 @@ func NewApp(cfg Config, pool *pgxpool.Pool, cache Cache, log *zap.Logger) *fiber
 	api.Post("/exams", adminGuru, s.createExam)
 	api.Post("/exams/:id/questions/import", adminGuru, s.importQuestions)
 	api.Post("/exams/:id/activate", adminGuru, s.activateExam) // pre-load ke cache
+	// Kuis AI (sesi kelas di IFP): generate via AI atau validasi JSON tempelan.
+	api.Post("/quiz/generate", adminGuru, s.postQuizGenerate)
+	api.Post("/quiz/validate", adminGuru, s.postQuizValidate)
 
 	// === Siswa ===
 	api.Get("/my/dashboard", siswa, s.studentDashboard)
