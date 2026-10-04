@@ -710,9 +710,14 @@ const QUIZ_SK = 'kuisai-skor'
 function KuisAI() {
   const [step, setStep] = useState('setup') // setup | review | tampil
   const [materi, setMateri] = useState('')
+  const [file, setFile] = useState(null)
   const [jumlah, setJumlah] = useState(10)
   const [kesulitan, setKesulitan] = useState('sedang')
-  const [mode, setMode] = useState('generate') // generate | tempel
+  const [provider, setProvider] = useState('server') // server | gemini
+  const [aiStatus, setAiStatus] = useState({ server: false, gemini: false })
+  const [geminiKey, setGeminiKey] = useState('')
+  const [showKeyForm, setShowKeyForm] = useState(false)
+  const [showAdv, setShowAdv] = useState(false) // mode lanjutan: tempel JSON
   const [raw, setRaw] = useState('')
   const [qs, setQs] = useState([])
   const [busy, setBusy] = useState(false)
@@ -721,11 +726,45 @@ function KuisAI() {
 
   function note(ok, text) { setMsgOk(ok); setMsg(text) }
 
+  useEffect(() => {
+    api.get('/ai/status').then(setAiStatus).catch(() => {})
+  }, [])
+
+  async function simpanKey() {
+    if (geminiKey.trim().length < 10) { note(false, '❌ Kunci terlalu pendek.'); return }
+    setBusy(true)
+    try {
+      await api.post('/ai/key', { provider: 'gemini', key: geminiKey.trim() })
+      setAiStatus((s) => ({ ...s, gemini: true }))
+      setGeminiKey(''); setShowKeyForm(false)
+      note(true, '✅ Kunci Gemini tersimpan terenkripsi.')
+    } catch (e) { note(false, '❌ ' + e.message) } finally { setBusy(false) }
+  }
+
+  async function hapusKey() {
+    if (!confirm('Hapus kunci Gemini tersimpan?')) return
+    try {
+      await api.del('/ai/key?provider=gemini')
+      setAiStatus((s) => ({ ...s, gemini: false }))
+      note(true, '✅ Kunci Gemini dihapus.')
+    } catch (e) { note(false, '❌ ' + e.message) }
+  }
+
   async function doGenerate() {
-    if (materi.trim().length < 50) { note(false, '❌ Materi terlalu pendek (min. 50 karakter).'); return }
     setBusy(true); note(false, '')
     try {
-      const r = await api.post('/quiz/generate', { materi, jumlah: +jumlah || 10, kesulitan })
+      let r
+      if (file) {
+        const fd = new FormData()
+        fd.append('file', file)
+        fd.append('provider', provider)
+        fd.append('jumlah', String(+jumlah || 10))
+        fd.append('kesulitan', kesulitan)
+        r = await api.postForm('/quiz/generate', fd)
+      } else {
+        if (materi.trim().length < 50) { note(false, '❌ Tempel materi dulu (min. 50 karakter) atau upload file.'); setBusy(false); return }
+        r = await api.post('/quiz/generate', { materi, jumlah: +jumlah || 10, kesulitan, provider })
+      }
       setQs(r.questions)
       setStep('review')
       note(true, `✅ ${r.questions.length} soal dibuat. Periksa & edit sebelum ditampilkan.`)
@@ -773,61 +812,99 @@ function KuisAI() {
       {step === 'setup' && (
         <div className="card" style={{ padding: 18, display: 'grid', gap: 12, maxWidth: 860 }}>
           <div style={{ fontWeight: 700 }}>🧠 Buat Kuis dari Materi</div>
-          <div className="btn-row">
-            <button className={'btn btn-sm ' + (mode === 'generate' ? 'btn-ok' : 'btn-ghost')} onClick={() => setMode('generate')}>✨ Generate AI</button>
-            <button className={'btn btn-sm ' + (mode === 'tempel' ? 'btn-ok' : 'btn-ghost')} onClick={() => setMode('tempel')}>📋 Tempel JSON</button>
+
+          <div>
+            <label className="label">Sumber AI</label>
+            <div className="btn-row">
+              <button className={'btn btn-sm ' + (provider === 'server' ? 'btn-ok' : 'btn-ghost')}
+                onClick={() => setProvider('server')}>
+                🏫 AI Sekolah{!aiStatus.server && ' (belum aktif)'}
+              </button>
+              <button className={'btn btn-sm ' + (provider === 'gemini' ? 'btn-ok' : 'btn-ghost')}
+                onClick={() => setProvider('gemini')}>
+                🔑 Gemini saya{aiStatus.gemini && ' ✓'}
+              </button>
+            </div>
           </div>
-          {mode === 'generate' ? (
-            <>
-              <div>
-                <label className="label">Materi (tempel teks materi yang sudah disiapkan)</label>
-                <textarea className="input" rows={8} value={materi} placeholder="Tempel isi materi di sini…"
-                  onChange={(e) => setMateri(e.target.value)} />
+
+          {provider === 'gemini' && !aiStatus.gemini && (
+            <div className="alert alert-warn">
+              <div style={{ marginBottom: 8 }}>
+                Tempel <b>API key Gemini</b> kamu (gratis dari{' '}
+                <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer">aistudio.google.com</a>).
+                Kunci tersimpan <b>terenkripsi</b> di server dan hanya dipakai untuk akunmu.
               </div>
-              <div className="grid-2">
-                <div>
-                  <label className="label">Jumlah soal</label>
-                  <input className="input" type="number" min={1} max={50} value={jumlah}
-                    onChange={(e) => setJumlah(e.target.value)} />
+              {!showKeyForm ? (
+                <button className="btn btn-sm btn-ok" onClick={() => setShowKeyForm(true)}>🔑 Simpan API key</button>
+              ) : (
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <input className="input" type="password" value={geminiKey} placeholder="AIza…"
+                    onChange={(e) => setGeminiKey(e.target.value)} style={{ fontFamily: 'monospace' }} />
+                  <button className="btn btn-sm btn-ok" disabled={busy} onClick={simpanKey}>Simpan</button>
+                  <button className="btn btn-sm btn-ghost" onClick={() => { setShowKeyForm(false); setGeminiKey('') }}>Batal</button>
                 </div>
-                <div>
-                  <label className="label">Kesulitan</label>
-                  <select className="input" value={kesulitan} onChange={(e) => setKesulitan(e.target.value)}>
-                    <option value="mudah">Mudah</option>
-                    <option value="sedang">Sedang</option>
-                    <option value="sukar">Sukar</option>
-                  </select>
-                </div>
-              </div>
+              )}
+            </div>
+          )}
+          {provider === 'gemini' && aiStatus.gemini && (
+            <div className="dim" style={{ fontSize: '.85rem' }}>
+              🔑 Kunci Gemini tersimpan. <button className="btn btn-sm btn-ghost" onClick={hapusKey}>Hapus kunci</button>
+            </div>
+          )}
+          {provider === 'server' && !aiStatus.server && (
+            <div className="alert alert-warn">
+              AI sekolah belum dikonfigurasi admin. Pakai <b>🔑 Gemini saya</b> di atas,
+              atau minta admin mengisi AI_BASE_URL / AI_API_KEY / AI_MODEL di server.
+            </div>
+          )}
+
+          <div>
+            <label className="label">Upload materi (PDF / PPTX / DOCX / TXT / MD)</label>
+            <input className="input" type="file" accept=".pdf,.pptx,.docx,.txt,.md"
+              onChange={(e) => setFile(e.target.files?.[0] || null)} />
+            {file && <div className="dim" style={{ fontSize: '.85rem', marginTop: 4 }}>📎 {file.name} — teks akan dibaca otomatis.</div>}
+          </div>
+          <div>
+            <label className="label">…atau tempel teks materi</label>
+            <textarea className="input" rows={6} value={materi} placeholder="Tempel isi materi di sini… (kosongkan jika sudah upload file)"
+              onChange={(e) => setMateri(e.target.value)} />
+          </div>
+          <div className="grid-2">
+            <div>
+              <label className="label">Jumlah soal</label>
+              <input className="input" type="number" min={1} max={50} value={jumlah}
+                onChange={(e) => setJumlah(e.target.value)} />
+            </div>
+            <div>
+              <label className="label">Kesulitan</label>
+              <select className="input" value={kesulitan} onChange={(e) => setKesulitan(e.target.value)}>
+                <option value="mudah">Mudah</option>
+                <option value="sedang">Sedang</option>
+                <option value="sukar">Sukar</option>
+              </select>
+            </div>
+          </div>
+          <div>
+            <button className="btn btn-ok" disabled={busy} onClick={doGenerate}>
+              {busy ? 'Membuat soal…' : '✨ Generate ' + (jumlah || 10) + ' Soal'}
+            </button>
+          </div>
+
+          <details style={{ marginTop: 4 }}>
+            <summary className="dim" style={{ cursor: 'pointer', fontSize: '.85rem' }}>
+              Mode lanjutan: tempel JSON soal dari chat AI
+            </summary>
+            <div style={{ display: 'grid', gap: 8, marginTop: 8 }}>
+              <textarea className="input" rows={5} value={raw}
+                placeholder={'{"questions":[{"soal":"...","opsi":["A","B","C","D"],"kunci":0,"pembahasan":"..."}]}'}
+                onChange={(e) => setRaw(e.target.value)} style={{ fontFamily: 'monospace', fontSize: '.8rem' }} />
               <div>
-                <button className="btn btn-ok" disabled={busy} onClick={doGenerate}>
-                  {busy ? 'Membuat soal…' : '✨ Generate ' + (jumlah || 10) + ' Soal'}
-                </button>
-              </div>
-              <div className="dim" style={{ fontSize: '.82rem' }}>
-                Membutuhkan AI yang dikonfigurasi di server (AI_BASE_URL / AI_API_KEY / AI_MODEL).
-                Belum ada? Pakai mode Tempel JSON — hasil chat dengan asisten AI bisa langsung dipakai.
-              </div>
-            </>
-          ) : (
-            <>
-              <div>
-                <label className="label">Tempel JSON soal (dari chat dengan asisten AI)</label>
-                <textarea className="input" rows={8} value={raw}
-                  placeholder={'{"questions":[{"soal":"...","opsi":["A","B","C","D"],"kunci":0,"pembahasan":"..."}]}'}
-                  onChange={(e) => setRaw(e.target.value)} style={{ fontFamily: 'monospace', fontSize: '.8rem' }} />
-              </div>
-              <div>
-                <button className="btn btn-ok" disabled={busy} onClick={doValidate}>
+                <button className="btn btn-sm" disabled={busy} onClick={doValidate}>
                   {busy ? 'Memvalidasi…' : '✅ Validasi & Lanjut'}
                 </button>
               </div>
-              <div className="dim" style={{ fontSize: '.82rem' }}>
-                Format: <code>{'{"questions":[{"soal":"...","opsi":["...","...","...","..."],"kunci":0,"pembahasan":"..."}]}'}</code> —
-                tepat 4 opsi, kunci 0=A … 3=D.
-              </div>
-            </>
-          )}
+            </div>
+          </details>
         </div>
       )}
 

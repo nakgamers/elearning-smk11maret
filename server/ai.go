@@ -8,8 +8,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -92,50 +98,56 @@ const quizSystemPrompt = `Kamu adalah generator soal kuis untuk guru SMK di Indo
 	`Field "kunci" adalah indeks opsi benar (0=A, 1=B, 2=C, 3=D). Acak posisi kunci jawaban antar soal.`
 
 // callAIChat memanggil endpoint chat-completions yang kompatibel OpenAI.
-// Konfigurasi via env: AI_BASE_URL, AI_API_KEY, AI_MODEL.
-func (s *Server) callAIChat(ctx context.Context, system, user string) (string, error) {
-	cfg := s.cfg
-	if cfg.AIBaseURL == "" || cfg.AIAPIKey == "" || cfg.AIModel == "" {
+type aiConf struct {
+	baseURL string
+	apiKey  string
+	model   string
+}
+
+func (s *Server) callAIChat(ctx context.Context, ac aiConf, system, user string) (string, error) {
+	if ac.baseURL == "" || ac.apiKey == "" || ac.model == "" {
 		return "", fmt.Errorf("AI belum dikonfigurasi")
 	}
 	body, _ := json.Marshal(map[string]any{
-		"model": cfg.AIModel,
+		"model": ac.model,
 		"messages": []map[string]string{
 			{"role": "system", "content": system},
 			{"role": "user", "content": user},
 		},
 		"temperature": 0.7,
 	})
-	url := strings.TrimRight(cfg.AIBaseURL, "/") + "/chat/completions"
+	url := strings.TrimRight(ac.baseURL, "/") + "/chat/completions"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+cfg.AIAPIKey)
+	req.Header.Set("Authorization", "Bearer "+ac.apiKey)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("gagal menghubungi AI: %v", err)
 	}
 	defer resp.Body.Close()
+	rawBody, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return "", fmt.Errorf("respons AI tidak terbaca: %v", err)
+	}
 	var out struct {
 		Choices []struct {
 			Message struct {
 				Content string `json:"content"`
 			} `json:"message"`
 		} `json:"choices"`
-		Error *struct {
-			Message string `json:"message"`
-		} `json:"error"`
+		Error json.RawMessage `json:"error"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return "", fmt.Errorf("respons AI tidak terbaca: %v", err)
+	if err := json.Unmarshal(rawBody, &out); err != nil {
+		return "", fmt.Errorf("respons AI tidak terbaca (%d): %s", resp.StatusCode, truncate(string(rawBody), 200))
 	}
-	if out.Error != nil {
-		return "", fmt.Errorf("AI menolak: %s", out.Error.Message)
+	if len(out.Error) > 0 && string(out.Error) != "null" {
+		return "", fmt.Errorf("AI menolak (%d): %s", resp.StatusCode, truncate(string(out.Error), 200))
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("AI HTTP %d", resp.StatusCode)
+		return "", fmt.Errorf("AI HTTP %d: %s", resp.StatusCode, truncate(string(rawBody), 200))
 	}
 	if len(out.Choices) == 0 {
 		return "", fmt.Errorf("AI tidak mengembalikan jawaban")
@@ -143,46 +155,109 @@ func (s *Server) callAIChat(ctx context.Context, system, user string) (string, e
 	return out.Choices[0].Message.Content, nil
 }
 
-// POST /api/quiz/generate  {materi, jumlah, kesulitan} -> {questions}
-// 501 bila AI belum dikonfigurasi (guru diminta pakai mode Tempel JSON).
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
+}
+
+// resolveAI menentukan konfigurasi AI berdasarkan provider pilihan guru:
+//   - "server" (default): memakai env server (mis. endpoint 9Router sekolah).
+//   - "gemini": memakai API key Gemini pribadi guru yang tersimpan terenkripsi.
+func (s *Server) resolveAI(c fiber.Ctx, provider string) (aiConf, error) {
+	if provider == "" {
+		provider = "server"
+	}
+	switch provider {
+	case "server":
+		ac := aiConf{baseURL: s.cfg.AIBaseURL, apiKey: s.cfg.AIAPIKey, model: s.cfg.AIModel}
+		if ac.baseURL == "" || ac.apiKey == "" || ac.model == "" {
+			return ac, fmt.Errorf("AI sekolah belum dikonfigurasi. Minta admin mengisi AI_BASE_URL, AI_API_KEY, dan AI_MODEL — atau gunakan Gemini pribadi.")
+		}
+		return ac, nil
+	case "gemini":
+		key, err := s.getAIKey(c.RequestCtx(), claimsOf(c).UID, "gemini")
+		if err != nil || key == "" {
+			return aiConf{}, fmt.Errorf("kunci Gemini belum disimpan. Tempel API key Gemini (gratis dari aistudio.google.com) di pengaturan.")
+		}
+		return aiConf{
+			baseURL: "https://generativelanguage.googleapis.com/v1beta/openai",
+			apiKey:  key,
+			model:   s.cfg.AIGeminiModel,
+		}, nil
+	default:
+		return aiConf{}, fmt.Errorf("provider %q tidak dikenal", provider)
+	}
+}
+
+// POST /api/quiz/generate  {materi?, jumlah, kesulitan, provider?} -> {questions}
+// atau multipart/form-data dengan field "file" (pdf/pptx/docx/txt/md).
+// 501 bila provider yang dipilih belum dikonfigurasi.
 func (s *Server) postQuizGenerate(c fiber.Ctx) error {
-	var b struct {
-		Materi     string `json:"materi"`
-		Jumlah     int    `json:"jumlah"`
-		Kesulitan  string `json:"kesulitan"`
+	var materi, provider string
+	var jumlah int
+	var kesulitan string
+
+	if strings.HasPrefix(c.Get("Content-Type"), "multipart/form-data") {
+		fh, err := c.FormFile("file")
+		if err != nil {
+			return fiber.NewError(fiber.StatusBadRequest, "file tidak ditemukan (field \"file\")")
+		}
+		f, err := fh.Open()
+		if err != nil {
+			return fiber.NewError(fiber.StatusBadRequest, "gagal membuka file")
+		}
+		text, err := extractMateriText(fh.Filename, f)
+		f.Close()
+		if err != nil {
+			return fiber.NewError(fiber.StatusBadRequest, err.Error())
+		}
+		materi = text
+		provider = c.FormValue("provider")
+		fmt.Sscanf(c.FormValue("jumlah"), "%d", &jumlah)
+		kesulitan = c.FormValue("kesulitan")
+	} else {
+		var b struct {
+			Materi    string `json:"materi"`
+			Jumlah    int    `json:"jumlah"`
+			Kesulitan string `json:"kesulitan"`
+			Provider  string `json:"provider"`
+		}
+		if err := c.Bind().JSON(&b); err != nil {
+			return fiber.NewError(fiber.StatusBadRequest, "body tidak valid")
+		}
+		materi = strings.TrimSpace(b.Materi)
+		provider = b.Provider
+		jumlah = b.Jumlah
+		kesulitan = b.Kesulitan
 	}
-	if err := c.Bind().JSON(&b); err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "body tidak valid")
-	}
-	materi := strings.TrimSpace(b.Materi)
+
 	if len(materi) < 50 {
 		return fiber.NewError(fiber.StatusBadRequest, "materi terlalu pendek (min. 50 karakter)")
 	}
-	if len(materi) > 20000 {
-		return fiber.NewError(fiber.StatusBadRequest, "materi terlalu panjang (maks. 20000 karakter)")
+	if len(materi) > maxMateriChars {
+		materi = materi[:maxMateriChars]
 	}
-	jumlah := b.Jumlah
 	if jumlah <= 0 {
 		jumlah = 10
 	}
 	if jumlah > 50 {
 		jumlah = 50
 	}
-	kesulitan := b.Kesulitan
 	if kesulitan == "" {
 		kesulitan = "sedang"
 	}
-	if s.cfg.AIAPIKey == "" || s.cfg.AIBaseURL == "" || s.cfg.AIModel == "" {
-		return c.Status(fiber.StatusNotImplemented).JSON(fiber.Map{
-			"error": "AI belum dikonfigurasi di server. Minta admin mengisi AI_BASE_URL, AI_API_KEY, dan AI_MODEL — atau gunakan mode Tempel JSON.",
-		})
+	ac, err := s.resolveAI(c, provider)
+	if err != nil {
+		return c.Status(fiber.StatusNotImplemented).JSON(fiber.Map{"error": err.Error()})
 	}
 	userPrompt := fmt.Sprintf(
 		"Buat %d soal pilihan ganda dengan tingkat kesulitan \"%s\" dari materi berikut:\n\n%s",
 		jumlah, kesulitan, materi)
 	ctx, cancel := context.WithTimeout(c.RequestCtx(), time.Duration(s.cfg.AITimeoutSec)*time.Second)
 	defer cancel()
-	raw, err := s.callAIChat(ctx, quizSystemPrompt, userPrompt)
+	raw, err := s.callAIChat(ctx, ac, quizSystemPrompt, userPrompt)
 	if err != nil {
 		s.log.Warn("quiz generate gagal", zapErr(err))
 		return fiber.NewError(fiber.StatusBadGateway, "gagal meminta AI: "+err.Error())
@@ -213,4 +288,109 @@ func (s *Server) postQuizValidate(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, err.Error())
 	}
 	return c.JSON(fiber.Map{"questions": qs})
+}
+
+// === Kunci AI pribadi guru (Gemini) — tersimpan terenkripsi AES-GCM ===
+
+func (s *Server) aiCipher() (cipher.AEAD, error) {
+	sum := sha256.Sum256([]byte("elearning-ai-key:" + s.cfg.Secret))
+	block, err := aes.NewCipher(sum[:])
+	if err != nil {
+		return nil, err
+	}
+	return cipher.NewGCM(block)
+}
+
+func (s *Server) encryptAIKey(plain string) (string, error) {
+	aead, err := s.aiCipher()
+	if err != nil {
+		return "", err
+	}
+	nonce := make([]byte, aead.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return "", err
+	}
+	ct := aead.Seal(nonce, nonce, []byte(plain), nil)
+	return base64.StdEncoding.EncodeToString(ct), nil
+}
+
+func (s *Server) decryptAIKey(enc string) (string, error) {
+	aead, err := s.aiCipher()
+	if err != nil {
+		return "", err
+	}
+	ct, err := base64.StdEncoding.DecodeString(enc)
+	if err != nil {
+		return "", err
+	}
+	nonce := ct[:aead.NonceSize()]
+	pt, err := aead.Open(nil, nonce, ct[aead.NonceSize():], nil)
+	if err != nil {
+		return "", err
+	}
+	return string(pt), nil
+}
+
+func (s *Server) getAIKey(ctx context.Context, uid int64, provider string) (string, error) {
+	var enc string
+	err := s.pool.QueryRow(ctx,
+		`SELECT key_enc FROM ai_keys WHERE user_id=$1 AND provider=$2`, uid, provider).Scan(&enc)
+	if err != nil {
+		return "", err
+	}
+	return s.decryptAIKey(enc)
+}
+
+// GET /api/ai/status -> {server: bool, gemini: bool}
+func (s *Server) getAIStatus(c fiber.Ctx) error {
+	serverOK := s.cfg.AIBaseURL != "" && s.cfg.AIAPIKey != "" && s.cfg.AIModel != ""
+	var n int
+	_ = s.pool.QueryRow(c.RequestCtx(),
+		`SELECT COUNT(*) FROM ai_keys WHERE user_id=$1 AND provider='gemini'`,
+		claimsOf(c).UID).Scan(&n)
+	return c.JSON(fiber.Map{"server": serverOK, "gemini": n > 0})
+}
+
+// POST /api/ai/key  {provider: "gemini", key} — simpan/rotasi kunci pribadi.
+func (s *Server) postAIKey(c fiber.Ctx) error {
+	var b struct {
+		Provider string `json:"provider"`
+		Key      string `json:"key"`
+	}
+	if err := c.Bind().JSON(&b); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "body tidak valid")
+	}
+	if b.Provider != "gemini" {
+		return fiber.NewError(fiber.StatusBadRequest, "provider tidak didukung")
+	}
+	key := strings.TrimSpace(b.Key)
+	if len(key) < 10 {
+		return fiber.NewError(fiber.StatusBadRequest, "kunci terlalu pendek")
+	}
+	enc, err := s.encryptAIKey(key)
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, "gagal mengenkripsi kunci")
+	}
+	_, err = s.pool.Exec(c.RequestCtx(), `
+		INSERT INTO ai_keys (user_id, provider, key_enc, updated_at)
+		VALUES ($1, $2, $3, now())
+		ON CONFLICT (user_id) DO UPDATE SET provider=$2, key_enc=$3, updated_at=now()`,
+		claimsOf(c).UID, "gemini", enc)
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, "gagal menyimpan kunci")
+	}
+	return c.JSON(fiber.Map{"ok": true})
+}
+
+// DELETE /api/ai/key?provider=gemini — hapus kunci pribadi.
+func (s *Server) deleteAIKey(c fiber.Ctx) error {
+	if c.Query("provider") != "gemini" {
+		return fiber.NewError(fiber.StatusBadRequest, "provider tidak didukung")
+	}
+	_, err := s.pool.Exec(c.RequestCtx(),
+		`DELETE FROM ai_keys WHERE user_id=$1 AND provider='gemini'`, claimsOf(c).UID)
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, "gagal menghapus kunci")
+	}
+	return c.JSON(fiber.Map{"ok": true})
 }

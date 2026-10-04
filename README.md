@@ -61,22 +61,27 @@ npm run dev          # → http://localhost:3000  (proxy /api ke :8081)
 Akun awal (seed otomatis): `admin/admin123`, guru contoh `guru.mtk/admin123`,
 siswa contoh NIS `24001/siswa123` (password siswa default saat import = `siswa123`).
 
-## Kuis AI — konfigurasi AI (opsional)
+## Kuis AI — sumber AI (dua jalur)
 
-Endpoint `POST /api/quiz/generate` memanggil LLM yang kompatibel OpenAI
-(`{AI_BASE_URL}/chat/completions`). Isi env berikut untuk mengaktifkannya:
+Guru memilih salah satu saat membuat kuis:
 
-```bash
-AI_BASE_URL="https://api.openai.com/v1"   # atau 9Router / OpenRouter / dsb.
-AI_API_KEY="sk-..."
-AI_MODEL="gpt-4o-mini"
-AI_TIMEOUT_SEC="120"                       # opsional, default 120
-```
+1. **🏫 AI Sekolah** — via env server (konsep proxy ala 9Router: guru tidak
+   perlu kunci sendiri):
+   ```bash
+   AI_BASE_URL="https://..."   # endpoint OpenAI-compatible (mis. 9Router)
+   AI_API_KEY="..."
+   AI_MODEL="..."
+   AI_TIMEOUT_SEC="120"         # opsional, default 120
+   ```
+2. **🔑 Gemini pribadi guru** — guru menempel API key Gemini miliknya
+   (gratis dari aistudio.google.com) sekali di UI; tersimpan **terenkripsi
+   AES-GCM** per akun (`ai_keys`), dipakai via endpoint OpenAI-compatible
+   Google (`.../v1beta/openai`, model default `gemini-2.0-flash`,
+   bisa diubah via `AI_GEMINI_MODEL`).
 
-Tanpa konfigurasi ini, endpoint mengembalikan 501 dan guru memakai mode
-**Tempel JSON**: hasil chat dengan asisten AI (format
-`{"questions":[{"soal":"...","opsi":["A","B","C","D"],"kunci":0,"pembahasan":"..."}]}`)
-ditempel lalu divalidasi server via `POST /api/quiz/validate`.
+Materi bisa ditempel sebagai teks atau **di-upload (PDF/PPTX/DOCX/TXT/MD)** —
+teks diekstrak otomatis di server. Mode lanjutan "tempel JSON" tetap ada
+untuk hasil chat dengan asisten AI (`POST /api/quiz/validate`).
 
 ## Smoke test backend
 
