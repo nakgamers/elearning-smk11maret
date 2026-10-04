@@ -132,27 +132,59 @@ func (s *Server) callAIChat(ctx context.Context, ac aiConf, system, user string)
 	if err != nil {
 		return "", fmt.Errorf("respons AI tidak terbaca: %v", err)
 	}
-	var out struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-		Error json.RawMessage `json:"error"`
+	return parseChatCompletion(resp.StatusCode, rawBody)
+}
+
+// parseChatCompletion membaca respons chat-completions dalam dua bentuk:
+// JSON langsung, atau SSE ("data: {...}" + "data: [DONE]") seperti yang
+// dikembalikan bridge 9Router untuk request non-streaming.
+func parseChatCompletion(status int, rawBody []byte) (string, error) {
+	candidates := [][]byte{bytes.TrimSpace(rawBody)}
+	// Kumpulkan payload SSE bila ada.
+	for _, line := range bytes.Split(rawBody, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if bytes.HasPrefix(line, []byte("data:")) {
+			payload := bytes.TrimSpace(line[len("data:"):])
+			if len(payload) > 0 && !bytes.Equal(payload, []byte("[DONE]")) {
+				candidates = append(candidates, payload)
+			}
+		}
 	}
-	if err := json.Unmarshal(rawBody, &out); err != nil {
-		return "", fmt.Errorf("respons AI tidak terbaca (%d): %s", resp.StatusCode, truncate(string(rawBody), 200))
+	// Kasus bridge 9Router: JSON diikuti "data: [DONE]" dalam SATU baris.
+	// Ambil objek JSON terluar via pencocokan kurung kurawal.
+	if obj := extractJSONObject(rawBody); obj != nil {
+		candidates = append(candidates, obj)
 	}
-	if len(out.Error) > 0 && string(out.Error) != "null" {
-		return "", fmt.Errorf("AI menolak (%d): %s", resp.StatusCode, truncate(string(out.Error), 200))
+	var lastErr error
+	for _, cand := range candidates {
+		var out struct {
+			Choices []struct {
+				Message struct {
+					Content string `json:"content"`
+				} `json:"message"`
+			} `json:"choices"`
+			Error json.RawMessage `json:"error"`
+		}
+		if err := json.Unmarshal(cand, &out); err != nil {
+			lastErr = err
+			continue
+		}
+		if len(out.Error) > 0 && string(out.Error) != "null" {
+			return "", fmt.Errorf("AI menolak (%d): %s", status, truncate(string(out.Error), 200))
+		}
+		if status < 200 || status >= 300 {
+			return "", fmt.Errorf("AI HTTP %d: %s", status, truncate(string(cand), 200))
+		}
+		if len(out.Choices) == 0 {
+			lastErr = fmt.Errorf("AI tidak mengembalikan jawaban")
+			continue
+		}
+		return out.Choices[0].Message.Content, nil
 	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("AI HTTP %d: %s", resp.StatusCode, truncate(string(rawBody), 200))
+	if lastErr == nil {
+		lastErr = fmt.Errorf("respons AI tidak terbaca (%d): %s", status, truncate(string(rawBody), 200))
 	}
-	if len(out.Choices) == 0 {
-		return "", fmt.Errorf("AI tidak mengembalikan jawaban")
-	}
-	return out.Choices[0].Message.Content, nil
+	return "", lastErr
 }
 
 func truncate(s string, n int) string {
@@ -160,6 +192,43 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// extractJSONObject mengambil objek JSON terluar dari awal body dengan
+// mencocokkan kurung kurawal (menghormati string dan escape).
+func extractJSONObject(b []byte) []byte {
+	start := bytes.IndexByte(b, '{')
+	if start < 0 {
+		return nil
+	}
+	depth := 0
+	inStr := false
+	esc := false
+	for i := start; i < len(b); i++ {
+		c := b[i]
+		if inStr {
+			if esc {
+				esc = false
+			} else if c == '\\' {
+				esc = true
+			} else if c == '"' {
+				inStr = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inStr = true
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return b[start : i+1]
+			}
+		}
+	}
+	return nil
 }
 
 // resolveAI menentukan konfigurasi AI berdasarkan provider pilihan guru:
