@@ -177,6 +177,38 @@ func (s *Server) callAIChat(ctx context.Context, ac aiConf, system, user string)
 	if ac.baseURL == "" || ac.apiKey == "" || ac.model == "" {
 		return "", fmt.Errorf("AI belum dikonfigurasi")
 	}
+	// Retry untuk error transient (503/429 — mis. model Google overload).
+	// Backoff 30 dtk lalu 60 dtk; total dibatasi context dari pemanggil.
+	backoffs := []time.Duration{0, 30 * time.Second, 60 * time.Second}
+	var lastErr error
+	for i, wait := range backoffs {
+		if i > 0 {
+			t := time.NewTimer(wait)
+			select {
+			case <-ctx.Done():
+				t.Stop()
+				return "", fmt.Errorf("gagal menghubungi AI: %v", ctx.Err())
+			case <-t.C:
+			}
+			s.log.Info(fmt.Sprintf("quiz: retry AI (percobaan %d)", i+1))
+		}
+		content, status, err := s.callAIChatOnce(ctx, ac, system, user)
+		if err == nil {
+			return content, nil
+		}
+		lastErr = err
+		if status == 503 || status == 429 {
+			continue // transient, coba lagi
+		}
+		return "", err // permanen (401/404/400...), langsung gagal
+	}
+	if lastErr != nil {
+		s.log.Warn("quiz: AI tetap sibuk setelah retry", zapErr(lastErr))
+	}
+	return "", fmt.Errorf("AI sedang sibuk (server penuh), coba lagi beberapa saat")
+}
+
+func (s *Server) callAIChatOnce(ctx context.Context, ac aiConf, system, user string) (string, int, error) {
 	body, _ := json.Marshal(map[string]any{
 		"model": ac.model,
 		"messages": []map[string]string{
@@ -188,20 +220,21 @@ func (s *Server) callAIChat(ctx context.Context, ac aiConf, system, user string)
 	url := strings.TrimRight(ac.baseURL, "/") + "/chat/completions"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+ac.apiKey)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("gagal menghubungi AI: %v", err)
+		return "", 0, fmt.Errorf("gagal menghubungi AI: %v", err)
 	}
 	defer resp.Body.Close()
 	rawBody, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
-		return "", fmt.Errorf("respons AI tidak terbaca: %v", err)
+		return "", resp.StatusCode, fmt.Errorf("respons AI tidak terbaca: %v", err)
 	}
-	return parseChatCompletion(resp.StatusCode, rawBody)
+	content, err := parseChatCompletion(resp.StatusCode, rawBody)
+	return content, resp.StatusCode, err
 }
 
 // parseChatCompletion membaca respons chat-completions dalam dua bentuk:

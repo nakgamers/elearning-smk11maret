@@ -780,7 +780,7 @@ function KuisAI() {
         '🔍 Mengecek ulang kunci jawaban...',
         '📝 Hampir jadi — merapikan format soal...',
       ]
-      for (let i = 0; i < 120; i++) {
+      for (let i = 0; i < 200; i++) {
         await new Promise((res) => setTimeout(res, 2500))
         const j = await api.get('/quiz/jobs/' + jobId)
         if (j.status === 'done') {
