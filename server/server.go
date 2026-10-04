@@ -32,9 +32,12 @@ func NewApp(cfg Config, pool *pgxpool.Pool, cache Cache, log *zap.Logger) *fiber
 	os.MkdirAll(cfg.UploadDir, 0o755)
 
 	app := fiber.New(fiber.Config{
-		BodyLimit:    int(cfg.MaxUploadMB * 1024 * 1024),
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 30 * time.Second,
+		BodyLimit: int(cfg.MaxUploadMB * 1024 * 1024),
+		// Kuis AI: ekstraksi PDF + generate 10 soal via AI bisa >30 dtk
+		// (AITimeoutSec default 120). Timeout server harus di atasnya,
+		// kalau tidak koneksi diputus tengah jalan (socket hang up).
+		ReadTimeout:  120 * time.Second,
+		WriteTimeout: time.Duration(cfg.AITimeoutSec+60) * time.Second,
 	})
 	app.Use(recoverer.New())
 	app.Use(cors.New(cors.Config{AllowOrigins: []string{"*"}, AllowHeaders: []string{"Origin", "Content-Type", "Accept", "Authorization"}}))
