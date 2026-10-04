@@ -770,6 +770,16 @@ function KuisAI() {
       if (!jobId) throw new Error('server tidak mengembalikan job_id')
       // Polling: generate via AI bisa 1-3 menit untuk materi besar.
       // Tiap poll cepat, jadi kebal terhadap timeout proxy.
+      const tungguPesan = [
+        '⏳ Quineilla sedang membaca materimu...',
+        '📖 Menandai konsep-konsep kunci...',
+        '✍️ Menyusun opsi pengecoh yang (semoga) mengecoh...',
+        '🧠 Meracik pembahasan tiap soal...',
+        '☕ Sambil menunggu: siapkan IFP dan atur posisi duduk siswa...',
+        '🎲 Fakta: guru yang pakai kuis dadakan bikin siswa 2x lebih waspada.',
+        '🔍 Mengecek ulang kunci jawaban...',
+        '📝 Hampir jadi — merapikan format soal...',
+      ]
       for (let i = 0; i < 120; i++) {
         await new Promise((res) => setTimeout(res, 2500))
         const j = await api.get('/quiz/jobs/' + jobId)
@@ -780,7 +790,8 @@ function KuisAI() {
           return
         }
         if (j.status === 'error') throw new Error(j.error || 'gagal membuat soal')
-        note(false, `⏳ Quineilla sedang menyusun soal... (${Math.round((i + 1) * 2.5)} dtk)`)
+        const detik = Math.round((i + 1) * 2.5)
+        note(false, `${tungguPesan[i % tungguPesan.length]} (${detik} dtk)`)
       }
       throw new Error('waktu tunggu habis (5 menit) — coba lagi')
     } catch (e) { note(false, '❌ ' + e.message) } finally { setBusy(false) }
