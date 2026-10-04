@@ -8,6 +8,8 @@ const TABS = [
   { id: 'tugas', label: 'Tugas & Nilai', icon: '📝' },
   { id: 'absen', label: 'Absensi', icon: '🗓️' },
   { id: 'ujian', label: 'Ujian', icon: '📋' },
+  { id: 'kuis', label: 'Kuis AI', icon: '🧠' },
+  { id: 'rpn', label: 'Acak Nama', icon: '🎲' },
   { id: 'umum', label: 'Pengumuman', icon: '📢' },
 ]
 
@@ -28,6 +30,8 @@ export default function Guru() {
       {tab === 'tugas' && <Tugas />}
       {tab === 'absen' && <Absen />}
       {tab === 'ujian' && <Ujian />}
+      {tab === 'kuis' && <KuisAI />}
+      {tab === 'rpn' && <RPN />}
       {tab === 'umum' && <Umum />}
       {tab === 'walas' && isWalas && <Walas user={user} />}
     </Shell>
@@ -603,6 +607,491 @@ function Walas({ user }) {
             </table>
           )
         )}
+      </div>
+    </div>
+  )
+}
+// ===== Random Pick Name: pilih siswa maju secara acak (tampil di IFP) =====
+function RPN() {
+  const rombel = useRombel()
+  const [kelas, setKelas] = useState('')
+  const [students, setStudents] = useState([])
+  const [current, setCurrent] = useState(null)
+  const [calledIds, setCalledIds] = useState([])
+  const [noRepeat, setNoRepeat] = useState(true)
+  const [rolling, setRolling] = useState(false)
+  const [msg, setMsg] = useState('')
+
+  useEffect(() => {
+    if (!kelas) { setStudents([]); setCalledIds([]); setCurrent(null); return }
+    api.get('/students?kelas=' + encodeURIComponent(kelas))
+      .then(setStudents).catch(() => {})
+    setCalledIds([]); setCurrent(null); setMsg('')
+  }, [kelas])
+
+  function pick() {
+    if (rolling || !students.length) return
+    const pool = noRepeat ? students.filter((s) => !calledIds.includes(s.id)) : students
+    if (!pool.length) { setMsg('Semua siswa sudah dipanggil. Tekan Reset untuk mengulang.'); return }
+    setMsg('')
+    setRolling(true)
+    const iv = setInterval(() => setCurrent(pool[Math.floor(Math.random() * pool.length)]), 90)
+    setTimeout(() => {
+      clearInterval(iv)
+      const w = pool[Math.floor(Math.random() * pool.length)]
+      setCurrent(w)
+      setCalledIds((c) => (c.includes(w.id) ? c : [...c, w.id]))
+      setRolling(false)
+    }, 1500)
+  }
+
+  function reset() { setCalledIds([]); setCurrent(null); setMsg('') }
+
+  const calledNames = students.filter((s) => calledIds.includes(s.id))
+
+  return (
+    <div style={{ display: 'grid', gap: 14, maxWidth: 860 }}>
+      <div className="card" style={{ padding: 18, display: 'grid', gap: 12 }}>
+        <div style={{ fontWeight: 700 }}>🎲 Acak Nama Siswa</div>
+        <div className="grid-2">
+          <div>
+            <label className="label">Rombel</label>
+            <select className="input" value={kelas} onChange={(e) => setKelas(e.target.value)}>
+              <option value="">Pilih rombel…</option>
+              {rombel.map((r) => <option key={r.id} value={r.nama}>{r.nama}</option>)}
+            </select>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'flex-end', gap: 8 }}>
+            <label style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: '.9rem' }}>
+              <input type="checkbox" checked={noRepeat} onChange={(e) => setNoRepeat(e.target.checked)} />
+              Tanpa pengulangan
+            </label>
+          </div>
+        </div>
+        {msg && <div className="alert alert-warn">{msg}</div>}
+        <div className="btn-row">
+          <button className="btn btn-ok" disabled={!kelas || rolling || !students.length} onClick={pick}>
+            {rolling ? 'Mengacak…' : '🎲 Acak!'}
+          </button>
+          <button className="btn btn-ghost" disabled={rolling} onClick={reset}>Reset</button>
+          <span className="dim" style={{ alignSelf: 'center' }}>
+            {students.length ? `${calledIds.length}/${students.length} sudah dipanggil` : 'Pilih rombel dulu'}
+          </span>
+        </div>
+      </div>
+
+      <div className="card" style={{ padding: 32, textAlign: 'center', minHeight: 190, display: 'grid', placeItems: 'center' }}>
+        {current ? (
+          <div className="animate-in" key={current.id + '-' + calledIds.length}>
+            <div className="dim">yang maju:</div>
+            <div style={{ fontSize: '2.6rem', fontWeight: 800 }}>{current.nama}</div>
+            <div className="dim">{current.nis} · {current.kelas}</div>
+          </div>
+        ) : (
+          <div className="empty"><span className="big">🎲</span>Nama yang terpilih tampil di sini</div>
+        )}
+      </div>
+
+      {calledNames.length > 0 && (
+        <div className="card" style={{ padding: 18 }}>
+          <div style={{ fontWeight: 700, marginBottom: 8 }}>Sudah dipanggil sesi ini</div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+            {calledNames.map((s) => <span key={s.id} className="badge badge-default">{s.nama}</span>)}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ===== Kuis AI: materi -> 10 soal -> tampil di IFP + papan skor manual =====
+const QUIZ_SK = 'kuisai-skor'
+
+function KuisAI() {
+  const [step, setStep] = useState('setup') // setup | review | tampil
+  const [materi, setMateri] = useState('')
+  const [file, setFile] = useState(null)
+  const [jumlah, setJumlah] = useState(10)
+  const [kesulitan, setKesulitan] = useState('sedang')
+  const [provider, setProvider] = useState('server') // server | gemini
+  const [aiStatus, setAiStatus] = useState({ server: false, gemini: false })
+  const [geminiKey, setGeminiKey] = useState('')
+  const [showKeyForm, setShowKeyForm] = useState(false)
+  const [showAdv, setShowAdv] = useState(false) // mode lanjutan: tempel JSON
+  const [raw, setRaw] = useState('')
+  const [qs, setQs] = useState([])
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState('')
+  const [msgOk, setMsgOk] = useState(false)
+
+  function note(ok, text) { setMsgOk(ok); setMsg(text) }
+
+  useEffect(() => {
+    api.get('/ai/status').then(setAiStatus).catch(() => {})
+  }, [])
+
+  async function simpanKey() {
+    if (geminiKey.trim().length < 10) { note(false, '❌ Kunci terlalu pendek.'); return }
+    setBusy(true)
+    try {
+      await api.post('/ai/key', { provider: 'gemini', key: geminiKey.trim() })
+      setAiStatus((s) => ({ ...s, gemini: true }))
+      setGeminiKey(''); setShowKeyForm(false)
+      note(true, '✅ Kunci Gemini tersimpan terenkripsi.')
+    } catch (e) { note(false, '❌ ' + e.message) } finally { setBusy(false) }
+  }
+
+  async function hapusKey() {
+    if (!confirm('Hapus kunci Gemini tersimpan?')) return
+    try {
+      await api.del('/ai/key?provider=gemini')
+      setAiStatus((s) => ({ ...s, gemini: false }))
+      note(true, '✅ Kunci Gemini dihapus.')
+    } catch (e) { note(false, '❌ ' + e.message) }
+  }
+
+  async function doGenerate() {
+    setBusy(true); note(false, '')
+    try {
+      let r
+      if (file) {
+        const fd = new FormData()
+        fd.append('file', file)
+        fd.append('provider', provider)
+        fd.append('jumlah', String(+jumlah || 10))
+        fd.append('kesulitan', kesulitan)
+        r = await api.postForm('/quiz/generate', fd)
+      } else {
+        if (materi.trim().length < 50) { note(false, '❌ Tempel materi dulu (min. 50 karakter) atau upload file.'); setBusy(false); return }
+        r = await api.post('/quiz/generate', { materi, jumlah: +jumlah || 10, kesulitan, provider })
+      }
+      setQs(r.questions)
+      setStep('review')
+      note(true, `✅ ${r.questions.length} soal dibuat. Periksa & edit sebelum ditampilkan.`)
+    } catch (e) { note(false, '❌ ' + e.message) } finally { setBusy(false) }
+  }
+
+  async function doValidate() {
+    if (!raw.trim()) { note(false, '❌ Tempel dulu JSON hasil chat AI.'); return }
+    setBusy(true); note(false, '')
+    try {
+      const r = await api.post('/quiz/validate', { raw })
+      setQs(r.questions)
+      setStep('review')
+      note(true, `✅ ${r.questions.length} soal valid. Periksa & edit sebelum ditampilkan.`)
+    } catch (e) { note(false, '❌ ' + e.message) } finally { setBusy(false) }
+  }
+
+  function updQ(i, patch) { setQs((list) => list.map((q, j) => (j === i ? { ...q, ...patch } : q))) }
+  function updOpsi(i, j, v) {
+    setQs((list) => list.map((q, k) => (k === i
+      ? { ...q, opsi: q.opsi.map((o, jj) => (jj === j ? v : o)) } : q)))
+  }
+  function delQ(i) { setQs((list) => list.filter((_, j) => j !== i)) }
+
+  function unduhJSON() {
+    const blob = new Blob([JSON.stringify({ questions: qs }, null, 2)], { type: 'application/json' })
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = 'kuis.json'
+    a.click()
+    URL.revokeObjectURL(a.href)
+  }
+
+  async function salinJSON() {
+    try {
+      await navigator.clipboard.writeText(JSON.stringify({ questions: qs }, null, 2))
+      note(true, '✅ JSON tersalin.')
+    } catch { note(false, '❌ Gagal menyalin.') }
+  }
+
+  return (
+    <div style={{ display: 'grid', gap: 14 }}>
+      {msg && <div className={'alert ' + (msgOk ? 'alert-ok' : 'alert-error')}>{msg}</div>}
+
+      {step === 'setup' && (
+        <div className="card" style={{ padding: 18, display: 'grid', gap: 12, maxWidth: 860 }}>
+          <div style={{ fontWeight: 700 }}>🧠 Buat Kuis dari Materi</div>
+
+          <div>
+            <label className="label">Sumber AI</label>
+            <div className="btn-row">
+              <button className={'btn btn-sm ' + (provider === 'server' ? 'btn-ok' : 'btn-ghost')}
+                onClick={() => setProvider('server')}>
+                ✨ Quineilla{!aiStatus.server && ' (belum aktif)'}
+              </button>
+              <button className={'btn btn-sm ' + (provider === 'gemini' ? 'btn-ok' : 'btn-ghost')}
+                onClick={() => setProvider('gemini')}>
+                🔑 Gemini saya{aiStatus.gemini && ' ✓'}
+              </button>
+            </div>
+          </div>
+
+          {provider === 'gemini' && !aiStatus.gemini && (
+            <div className="alert alert-warn">
+              <div style={{ marginBottom: 8 }}>
+                Tempel <b>API key Gemini</b> kamu (gratis dari{' '}
+                <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer">aistudio.google.com</a>).
+                Kunci tersimpan <b>terenkripsi</b> di server dan hanya dipakai untuk akunmu.
+              </div>
+              {!showKeyForm ? (
+                <button className="btn btn-sm btn-ok" onClick={() => setShowKeyForm(true)}>🔑 Simpan API key</button>
+              ) : (
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <input className="input" type="password" value={geminiKey} placeholder="AIza…"
+                    onChange={(e) => setGeminiKey(e.target.value)} style={{ fontFamily: 'monospace' }} />
+                  <button className="btn btn-sm btn-ok" disabled={busy} onClick={simpanKey}>Simpan</button>
+                  <button className="btn btn-sm btn-ghost" onClick={() => { setShowKeyForm(false); setGeminiKey('') }}>Batal</button>
+                </div>
+              )}
+            </div>
+          )}
+          {provider === 'gemini' && aiStatus.gemini && (
+            <div className="dim" style={{ fontSize: '.85rem' }}>
+              🔑 Kunci Gemini tersimpan. <button className="btn btn-sm btn-ghost" onClick={hapusKey}>Hapus kunci</button>
+            </div>
+          )}
+          {provider === 'server' && !aiStatus.server && (
+            <div className="alert alert-warn">
+              <b>✨ Quineilla</b> belum dikonfigurasi admin. Pakai <b>🔑 Gemini saya</b> di atas,
+              atau minta admin mengisi AI_BASE_URL / AI_API_KEY / AI_MODEL di server.
+            </div>
+          )}
+
+          <div>
+            <label className="label">Upload materi (PDF / PPTX / DOCX / TXT / MD)</label>
+            <input className="input" type="file" accept=".pdf,.pptx,.docx,.txt,.md"
+              onChange={(e) => setFile(e.target.files?.[0] || null)} />
+            {file && <div className="dim" style={{ fontSize: '.85rem', marginTop: 4 }}>📎 {file.name} — teks akan dibaca otomatis.</div>}
+          </div>
+          <div>
+            <label className="label">…atau tempel teks materi</label>
+            <textarea className="input" rows={6} value={materi} placeholder="Tempel isi materi di sini… (kosongkan jika sudah upload file)"
+              onChange={(e) => setMateri(e.target.value)} />
+          </div>
+          <div className="grid-2">
+            <div>
+              <label className="label">Jumlah soal</label>
+              <input className="input" type="number" min={1} max={50} value={jumlah}
+                onChange={(e) => setJumlah(e.target.value)} />
+            </div>
+            <div>
+              <label className="label">Kesulitan</label>
+              <select className="input" value={kesulitan} onChange={(e) => setKesulitan(e.target.value)}>
+                <option value="mudah">Mudah</option>
+                <option value="sedang">Sedang</option>
+                <option value="sukar">Sukar</option>
+              </select>
+            </div>
+          </div>
+          <div>
+            <button className="btn btn-ok" disabled={busy} onClick={doGenerate}>
+              {busy ? 'Membuat soal…' : '✨ Generate ' + (jumlah || 10) + ' Soal'}
+            </button>
+          </div>
+
+          <details style={{ marginTop: 4 }}>
+            <summary className="dim" style={{ cursor: 'pointer', fontSize: '.85rem' }}>
+              Mode lanjutan: tempel JSON soal dari chat AI
+            </summary>
+            <div style={{ display: 'grid', gap: 8, marginTop: 8 }}>
+              <textarea className="input" rows={5} value={raw}
+                placeholder={'{"questions":[{"soal":"...","opsi":["A","B","C","D"],"kunci":0,"pembahasan":"..."}]}'}
+                onChange={(e) => setRaw(e.target.value)} style={{ fontFamily: 'monospace', fontSize: '.8rem' }} />
+              <div>
+                <button className="btn btn-sm" disabled={busy} onClick={doValidate}>
+                  {busy ? 'Memvalidasi…' : '✅ Validasi & Lanjut'}
+                </button>
+              </div>
+            </div>
+          </details>
+        </div>
+      )}
+
+      {step === 'review' && (
+        <div style={{ display: 'grid', gap: 12, maxWidth: 860 }}>
+          <div className="btn-row">
+            <button className="btn btn-ok" disabled={!qs.length} onClick={() => setStep('tampil')}>▶️ Tampilkan Kuis ({qs.length} soal)</button>
+            <button className="btn btn-ghost btn-sm" onClick={unduhJSON}>⬇️ Unduh JSON</button>
+            <button className="btn btn-ghost btn-sm" onClick={salinJSON}>📋 Salin</button>
+            <button className="btn btn-ghost btn-sm" onClick={() => setStep('setup')}>← Kembali</button>
+          </div>
+          {qs.map((q, i) => (
+            <div key={i} className="card" style={{ padding: 16, display: 'grid', gap: 10 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <b>Soal {i + 1}</b>
+                <button className="btn btn-danger btn-sm" onClick={() => delQ(i)}>Hapus</button>
+              </div>
+              <textarea className="input" rows={2} value={q.soal} onChange={(e) => updQ(i, { soal: e.target.value })} />
+              <div className="grid-2">
+                {q.opsi.map((o, j) => (
+                  <div key={j} style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                    <input type="radio" name={'kunci-' + i} checked={q.kunci === j}
+                      onChange={() => updQ(i, { kunci: j })} title="Jawaban benar" />
+                    <b>{'ABCD'[j]}.</b>
+                    <input className="input" value={o} onChange={(e) => updOpsi(i, j, e.target.value)} />
+                  </div>
+                ))}
+              </div>
+              <input className="input" value={q.pembahasan || ''} placeholder="Pembahasan (opsional)"
+                onChange={(e) => updQ(i, { pembahasan: e.target.value })} />
+            </div>
+          ))}
+        </div>
+      )}
+
+      {step === 'tampil' && <KuisTampil qs={qs} onEdit={() => setStep('review')} />}
+    </div>
+  )
+}
+
+// Tampilan presentasi kuis untuk IFP + papan skor manual.
+function KuisTampil({ qs, onEdit }) {
+  const [idx, setIdx] = useState(0)
+  const [showAns, setShowAns] = useState(false)
+  const [showScore, setShowScore] = useState(false)
+  const q = qs[idx]
+
+  useEffect(() => { setShowAns(false) }, [idx])
+  useEffect(() => {
+    function onKey(e) {
+      if (e.key === 'ArrowRight') setIdx((i) => Math.min(qs.length - 1, i + 1))
+      if (e.key === 'ArrowLeft') setIdx((i) => Math.max(0, i - 1))
+      if (e.key === ' ') { e.preventDefault(); setShowAns((s) => !s) }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [qs.length])
+
+  function fullscreen() {
+    if (document.fullscreenElement) document.exitFullscreen()
+    else document.documentElement.requestFullscreen?.()
+  }
+
+  if (!q) return <div className="empty">Belum ada soal.</div>
+
+  return (
+    <div style={{ display: 'grid', gap: 12 }}>
+      <div className="btn-row">
+        <button className="btn btn-ghost btn-sm" onClick={onEdit}>✏️ Edit soal</button>
+        <button className="btn btn-ghost btn-sm" onClick={fullscreen}>⛶ Layar penuh</button>
+        <button className={'btn btn-sm ' + (showScore ? 'btn-ok' : 'btn-ghost')} onClick={() => setShowScore((s) => !s)}>🏆 Papan skor</button>
+        <span className="dim" style={{ alignSelf: 'center' }}>Soal {idx + 1} / {qs.length} · ← → navigasi · spasi = jawaban</span>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: showScore ? '1fr 320px' : '1fr', gap: 12, alignItems: 'start' }}>
+        <div className="card animate-in" key={idx} style={{ padding: 28 }}>
+          <div className="badge badge-default" style={{ marginBottom: 12 }}>Soal {idx + 1}</div>
+          <div style={{ fontSize: '1.5rem', fontWeight: 700, lineHeight: 1.5, marginBottom: 20 }}>{q.soal}</div>
+          <div style={{ display: 'grid', gap: 10 }}>
+            {q.opsi.map((o, j) => {
+              const benar = showAns && j === q.kunci
+              return (
+                <div key={j} className="card"
+                  style={{
+                    padding: '14px 16px', margin: 0, fontSize: '1.1rem',
+                    borderWidth: 2,
+                    borderColor: benar ? '#16a34a' : undefined,
+                    background: benar ? '#f0fdf4' : undefined,
+                  }}>
+                  <b style={{ marginRight: 10 }}>{'ABCD'[j]}.</b>{o}
+                  {benar && <span style={{ marginLeft: 10 }}>✅</span>}
+                </div>
+              )
+            })}
+          </div>
+          {showAns && q.pembahasan && (
+            <div className="alert alert-ok" style={{ marginTop: 16 }}>💡 {q.pembahasan}</div>
+          )}
+          <div className="btn-row" style={{ marginTop: 20 }}>
+            <button className="btn" disabled={idx === 0} onClick={() => setIdx(idx - 1)}>⬅️ Sebelumnya</button>
+            <button className="btn btn-ok" onClick={() => setShowAns((s) => !s)}>
+              {showAns ? '🙈 Sembunyikan jawaban' : '👁️ Lihat jawaban'}
+            </button>
+            <button className="btn" disabled={idx === qs.length - 1} onClick={() => setIdx(idx + 1)}>Berikutnya ➡️</button>
+          </div>
+        </div>
+        {showScore && <PapanSkor />}
+      </div>
+    </div>
+  )
+}
+
+// Papan skor manual: guru mengetuk nama siswa yang menjawab benar.
+// Tersimpan di localStorage per sesi (aman dari refresh).
+function PapanSkor() {
+  const rombel = useRombel()
+  const [kelas, setKelas] = useState('')
+  const [students, setStudents] = useState([])
+  const [skor, setSkor] = useState(() => {
+    try { return JSON.parse(localStorage.getItem(QUIZ_SK) || '{}') } catch { return {} }
+  })
+  const [poin, setPoin] = useState(10)
+  const [msg, setMsg] = useState('')
+
+  useEffect(() => {
+    localStorage.setItem(QUIZ_SK, JSON.stringify(skor))
+  }, [skor])
+
+  useEffect(() => {
+    if (!kelas) { setStudents([]); return }
+    api.get('/students?kelas=' + encodeURIComponent(kelas)).then(setStudents).catch(() => {})
+  }, [kelas])
+
+  function add(id, v) {
+    setSkor((s) => ({ ...s, [id]: Math.max(0, (s[id] || 0) + v) }))
+  }
+
+  function reset() {
+    if (confirm('Reset semua skor sesi ini?')) { setSkor({}); setMsg('') }
+  }
+
+  async function salinRekap() {
+    const rows = students
+      .map((s) => ({ nama: s.nama, nis: s.nis, skor: skor[s.id] || 0 }))
+      .filter((r) => r.skor > 0)
+      .sort((a, b) => b.skor - a.skor)
+    const teks = rows.length
+      ? 'Rekap Kuis (' + new Date().toLocaleDateString('id-ID') + ')\n' +
+        rows.map((r, i) => `${i + 1}. ${r.nama} (${r.nis}) — ${r.skor}`).join('\n')
+      : 'Belum ada skor.'
+    try { await navigator.clipboard.writeText(teks); setMsg('✅ Rekap tersalin.') }
+    catch { setMsg('❌ Gagal menyalin.') }
+  }
+
+  const terurut = [...students].sort((a, b) => (skor[b.id] || 0) - (skor[a.id] || 0))
+
+  return (
+    <div className="card" style={{ padding: 16, display: 'grid', gap: 10 }}>
+      <div style={{ fontWeight: 700 }}>🏆 Papan Skor</div>
+      <select className="input" value={kelas} onChange={(e) => setKelas(e.target.value)}>
+        <option value="">Pilih rombel…</option>
+        {rombel.map((r) => <option key={r.id} value={r.nama}>{r.nama}</option>)}
+      </select>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+        <label className="label" style={{ margin: 0 }}>Poin per jawaban</label>
+        <input className="input" type="number" min={1} value={poin} style={{ width: 80 }}
+          onChange={(e) => setPoin(+e.target.value || 1)} />
+      </div>
+      {msg && <div className="dim" style={{ fontSize: '.85rem' }}>{msg}</div>}
+      <div style={{ display: 'grid', gap: 6, maxHeight: 420, overflowY: 'auto' }}>
+        {terurut.map((s, i) => (
+          <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', border: '1px solid #e5e7eb', borderRadius: 10 }}>
+            <b style={{ width: 26 }}>{i + 1}</b>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.nama}</div>
+              <div className="dim" style={{ fontSize: '.75rem' }}>{s.nis}</div>
+            </div>
+            <b style={{ minWidth: 34, textAlign: 'right' }}>{skor[s.id] || 0}</b>
+            <button className="btn btn-sm btn-ok" onClick={() => add(s.id, poin)}>+{poin}</button>
+            <button className="btn btn-sm btn-ghost" onClick={() => add(s.id, -poin)}>−</button>
+          </div>
+        ))}
+        {!students.length && <div className="empty">Pilih rombel untuk memuat siswa.</div>}
+      </div>
+      <div className="btn-row">
+        <button className="btn btn-ghost btn-sm" onClick={salinRekap}>📋 Salin rekap</button>
+        <button className="btn btn-danger btn-sm" onClick={reset}>Reset</button>
       </div>
     </div>
   )

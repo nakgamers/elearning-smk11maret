@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"strings"
 )
@@ -14,6 +15,12 @@ type Config struct {
 	UploadDir   string
 	MaxUploadMB int64
 	BootstrapPw string // password admin awal
+	// AI untuk generator kuis (OpenAI-compatible). Kosong = mode Tempel JSON saja.
+	AIBaseURL   string
+	AIAPIKey    string
+	AIModel     string
+	AIGeminiModel string // model Gemini utk provider "gemini" (default gemini-2.0-flash)
+	AITimeoutSec int
 }
 
 func LoadConfig() Config {
@@ -26,6 +33,11 @@ func LoadConfig() Config {
 		UploadDir:   getenv("UPLOAD_DIR", "./uploads"),
 		MaxUploadMB: 20,
 		BootstrapPw: getenv("ADMIN_PASSWORD", "admin123"),
+		AIBaseURL:   strings.TrimSpace(os.Getenv("AI_BASE_URL")),
+		AIAPIKey:    strings.TrimSpace(os.Getenv("AI_API_KEY")),
+		AIModel:     strings.TrimSpace(os.Getenv("AI_MODEL")),
+		AIGeminiModel: getenv("AI_GEMINI_MODEL", "gemini-2.0-flash"),
+		AITimeoutSec: atoiEnv("AI_TIMEOUT_SEC", 120),
 	}
 	// Railway memberi DATABASE_URL dgn sslmode=require; pgx paham apa adanya.
 	c.DatabaseURL = strings.TrimSpace(c.DatabaseURL)
@@ -37,4 +49,16 @@ func getenv(k, def string) string {
 		return v
 	}
 	return def
+}
+
+func atoiEnv(k string, def int) int {
+	v := strings.TrimSpace(os.Getenv(k))
+	if v == "" {
+		return def
+	}
+	var n int
+	if _, err := fmt.Sscanf(v, "%d", &n); err != nil || n <= 0 {
+		return def
+	}
+	return n
 }

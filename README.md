@@ -18,6 +18,13 @@ mata pelajarannya.
 - **Ujian online**: paket diaktifkan → seluruh soal **pre-loaded ke Redis**
   (akses <1ms); jawaban disimpan lokal HP lalu **sync batch berkala** (idempotent);
   kalkulasi skor memakai **pessimistic lock**; jawaban dobel aman.
+- **Kuis AI (sesi kelas/IFP)**: guru menempel materi → AI membuat 10 soal
+  pilihan ganda (atau guru menempel JSON hasil chat dengan asisten AI) →
+  review & edit → tampil satu-per-satu di layar dengan tombol lihat jawaban,
+  navigasi keyboard (← → / spasi), mode layar penuh, dan **papan skor manual**
+  (ketuk nama siswa yang menjawab benar, tersimpan di localStorage, bisa salin rekap).
+- **Acak Nama (RPN)**: pilih rombel → acak nama siswa yang maju dengan animasi,
+  mode tanpa pengulangan + daftar "sudah dipanggil" per sesi.
 - **Export nilai** ke xlsx.
 - **Anti-cheat Android**: wrapper WebView dengan FLAG_SECURE + deteksi onPause.
 
@@ -53,6 +60,28 @@ npm run dev          # → http://localhost:3000  (proxy /api ke :8081)
 
 Akun awal (seed otomatis): `admin/admin123`, guru contoh `guru.mtk/admin123`,
 siswa contoh NIS `24001/siswa123` (password siswa default saat import = `siswa123`).
+
+## Kuis AI — sumber AI (dua jalur)
+
+Guru memilih salah satu saat membuat kuis:
+
+1. **✨ Quineilla** — AI asisten guru, via env server (konsep proxy ala 9Router: guru tidak
+   perlu kunci sendiri):
+   ```bash
+   AI_BASE_URL="https://..."   # endpoint OpenAI-compatible (mis. 9Router)
+   AI_API_KEY="..."
+   AI_MODEL="..."
+   AI_TIMEOUT_SEC="120"         # opsional, default 120
+   ```
+2. **🔑 Gemini pribadi guru** — guru menempel API key Gemini miliknya
+   (gratis dari aistudio.google.com) sekali di UI; tersimpan **terenkripsi
+   AES-GCM** per akun (`ai_keys`), dipakai via endpoint OpenAI-compatible
+   Google (`.../v1beta/openai`, model default `gemini-2.0-flash`,
+   bisa diubah via `AI_GEMINI_MODEL`).
+
+Materi bisa ditempel sebagai teks atau **di-upload (PDF/PPTX/DOCX/TXT/MD)** —
+teks diekstrak otomatis di server. Mode lanjutan "tempel JSON" tetap ada
+untuk hasil chat dengan asisten AI (`POST /api/quiz/validate`).
 
 ## Smoke test backend
 

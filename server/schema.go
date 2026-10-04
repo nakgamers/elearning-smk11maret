@@ -168,6 +168,14 @@ CREATE TABLE IF NOT EXISTS cheat_signals (
   jenis TEXT NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Kunci API AI pribadi guru (mis. Gemini) — tersimpan terenkripsi.
+CREATE TABLE IF NOT EXISTS ai_keys (
+  user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  provider TEXT NOT NULL DEFAULT 'gemini',
+  key_enc TEXT NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 `
 
 func Migrate(ctx context.Context, pool *pgxpool.Pool, log *zap.Logger) error {
