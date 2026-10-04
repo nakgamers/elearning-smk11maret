@@ -58,11 +58,12 @@ func validateQuizQuestions(raw json.RawMessage) ([]QuizQuestion, error) {
 			s = s[i : j+1]
 		}
 	}
-	var wrap struct {
-		Questions []QuizQuestion `json:"questions"`
+var wrap struct {
+		Questions []json.RawMessage `json:"questions"`
 	}
 	dec := json.NewDecoder(strings.NewReader(s))
-	dec.DisallowUnknownFields()
+	// Sengaja TANPA DisallowUnknownFields: model kadang menambah field
+	// ekstra; yang penting field wajib ada dan valid.
 	if err := dec.Decode(&wrap); err != nil {
 		return nil, fmt.Errorf("JSON tidak valid: %v", err)
 	}
@@ -72,7 +73,15 @@ func validateQuizQuestions(raw json.RawMessage) ([]QuizQuestion, error) {
 	if len(wrap.Questions) > 50 {
 		return nil, fmt.Errorf("maksimal 50 soal, dapat %d", len(wrap.Questions))
 	}
-	for i, q := range wrap.Questions {
+	qs := make([]QuizQuestion, 0, len(wrap.Questions))
+	for i, rawQ := range wrap.Questions {
+		q, err := normalizeQuizQuestion(rawQ)
+		if err != nil {
+			return nil, fmt.Errorf("soal %d: %v", i+1, err)
+		}
+		qs = append(qs, q)
+	}
+	for i, q := range qs {
 		n := i + 1
 		if strings.TrimSpace(q.Soal) == "" {
 			return nil, fmt.Errorf("soal %d: teks soal kosong", n)
@@ -89,7 +98,65 @@ func validateQuizQuestions(raw json.RawMessage) ([]QuizQuestion, error) {
 			return nil, fmt.Errorf("soal %d: kunci harus 0..3, dapat %d", n, q.Kunci)
 		}
 	}
-	return wrap.Questions, nil
+	return qs, nil
+}
+
+// normalizeQuizQuestion menoleransi variasi field yang lumrah dikeluarkan
+// model: typo ("soul" utk "soal"), sinonim ("pertanyaan", "options",
+// "jawaban", "penjelasan"), dan kunci berupa huruf "A"-"D".
+func normalizeQuizQuestion(raw json.RawMessage) (QuizQuestion, error) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return QuizQuestion{}, fmt.Errorf("bukan objek JSON")
+	}
+	lower := map[string]json.RawMessage{}
+	for k, v := range m {
+		lower[strings.ToLower(k)] = v
+	}
+	// Kanonikalisasi kunci umum.
+	renames := map[string]string{
+		"soul": "soal", "pertanyaan": "soal", "question": "soal",
+		"options": "opsi", "pilihan": "opsi", "choices": "opsi",
+		"answer": "kunci", "jawaban": "kunci", "kunci_jawaban": "kunci", "correct": "kunci",
+		"penjelasan": "pembahasan", "explanation": "pembahasan", "reason": "pembahasan",
+	}
+	for typo, canon := range renames {
+		if v, ok := lower[typo]; ok {
+			if _, exists := lower[canon]; !exists {
+				lower[canon] = v
+			}
+		}
+	}
+	var q QuizQuestion
+	getStr := func(key string) string {
+		var s string
+		if v, ok := lower[key]; ok {
+			_ = json.Unmarshal(v, &s)
+		}
+		return s
+	}
+	q.Soal = getStr("soal")
+	q.Pembahasan = getStr("pembahasan")
+	if v, ok := lower["opsi"]; ok {
+		_ = json.Unmarshal(v, &q.Opsi)
+	}
+	// Kunci: angka 0-3, atau huruf "A"-"D" / "a"-"d".
+	q.Kunci = -1
+	if v, ok := lower["kunci"]; ok {
+		var n int
+		if err := json.Unmarshal(v, &n); err == nil {
+			q.Kunci = n
+		} else {
+			var s string
+			if err := json.Unmarshal(v, &s); err == nil {
+				s = strings.ToUpper(strings.TrimSpace(s))
+				if len(s) == 1 && s[0] >= 'A' && s[0] <= 'D' {
+					q.Kunci = int(s[0] - 'A')
+				}
+			}
+		}
+	}
+	return q, nil
 }
 
 const quizSystemPrompt = `Kamu adalah generator soal kuis untuk guru SMK di Indonesia. ` +
