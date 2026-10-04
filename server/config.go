@@ -19,7 +19,7 @@ type Config struct {
 	AIBaseURL   string
 	AIAPIKey    string
 	AIModel     string
-	AIGeminiModel string // model Gemini utk provider "gemini" (default gemini-2.0-flash)
+	AIGeminiModel string // model Gemini utk provider "gemini" (default gemini-3.8-flash)
 	AITimeoutSec int
 }
 
@@ -36,7 +36,7 @@ func LoadConfig() Config {
 		AIBaseURL:   strings.TrimSpace(os.Getenv("AI_BASE_URL")),
 		AIAPIKey:    strings.TrimSpace(os.Getenv("AI_API_KEY")),
 		AIModel:     strings.TrimSpace(os.Getenv("AI_MODEL")),
-		AIGeminiModel: getenv("AI_GEMINI_MODEL", "gemini-2.0-flash"),
+		AIGeminiModel: getenv("AI_GEMINI_MODEL", "gemini-3.8-flash"),
 		AITimeoutSec: atoiEnv("AI_TIMEOUT_SEC", 300),
 	}
 	// Railway memberi DATABASE_URL dgn sslmode=require; pgx paham apa adanya.
