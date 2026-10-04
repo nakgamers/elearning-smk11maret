@@ -37,7 +37,7 @@ func LoadConfig() Config {
 		AIAPIKey:    strings.TrimSpace(os.Getenv("AI_API_KEY")),
 		AIModel:     strings.TrimSpace(os.Getenv("AI_MODEL")),
 		AIGeminiModel: getenv("AI_GEMINI_MODEL", "gemini-2.0-flash"),
-		AITimeoutSec: atoiEnv("AI_TIMEOUT_SEC", 120),
+		AITimeoutSec: atoiEnv("AI_TIMEOUT_SEC", 300),
 	}
 	// Railway memberi DATABASE_URL dgn sslmode=require; pgx paham apa adanya.
 	c.DatabaseURL = strings.TrimSpace(c.DatabaseURL)

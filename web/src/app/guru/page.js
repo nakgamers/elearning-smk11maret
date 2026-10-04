@@ -753,21 +753,36 @@ function KuisAI() {
   async function doGenerate() {
     setBusy(true); note(false, '')
     try {
-      let r
+      let jobId
       if (file) {
         const fd = new FormData()
         fd.append('file', file)
         fd.append('provider', provider)
         fd.append('jumlah', String(+jumlah || 10))
         fd.append('kesulitan', kesulitan)
-        r = await api.postForm('/quiz/generate', fd)
+        const r = await api.postForm('/quiz/generate', fd)
+        jobId = r.job_id
       } else {
         if (materi.trim().length < 50) { note(false, '❌ Tempel materi dulu (min. 50 karakter) atau upload file.'); setBusy(false); return }
-        r = await api.post('/quiz/generate', { materi, jumlah: +jumlah || 10, kesulitan, provider })
+        const r = await api.post('/quiz/generate', { materi, jumlah: +jumlah || 10, kesulitan, provider })
+        jobId = r.job_id
       }
-      setQs(r.questions)
-      setStep('review')
-      note(true, `✅ ${r.questions.length} soal dibuat. Periksa & edit sebelum ditampilkan.`)
+      if (!jobId) throw new Error('server tidak mengembalikan job_id')
+      // Polling: generate via AI bisa 1-3 menit untuk materi besar.
+      // Tiap poll cepat, jadi kebal terhadap timeout proxy.
+      for (let i = 0; i < 120; i++) {
+        await new Promise((res) => setTimeout(res, 2500))
+        const j = await api.get('/quiz/jobs/' + jobId)
+        if (j.status === 'done') {
+          setQs(j.questions)
+          setStep('review')
+          note(true, `✅ ${j.questions.length} soal dibuat. Periksa & edit sebelum ditampilkan.`)
+          return
+        }
+        if (j.status === 'error') throw new Error(j.error || 'gagal membuat soal')
+        note(false, `⏳ Quineilla sedang menyusun soal... (${Math.round((i + 1) * 2.5)} dtk)`)
+      }
+      throw new Error('waktu tunggu habis (5 menit) — coba lagi')
     } catch (e) { note(false, '❌ ' + e.message) } finally { setBusy(false) }
   }
 

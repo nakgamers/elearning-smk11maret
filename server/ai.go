@@ -13,11 +13,13 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
@@ -260,9 +262,13 @@ func (s *Server) resolveAI(c fiber.Ctx, provider string) (aiConf, error) {
 	}
 }
 
-// POST /api/quiz/generate  {materi?, jumlah, kesulitan, provider?} -> {questions}
+// POST /api/quiz/generate  {materi?, jumlah, kesulitan, provider?} -> 202 {job_id}
 // atau multipart/form-data dengan field "file" (pdf/pptx/docx/txt/md).
 // 501 bila provider yang dipilih belum dikonfigurasi.
+//
+// ASYNC: generate soal via AI bisa 1-3 menit (materi besar). Agar kebal
+// terhadap timeout di rantai proxy (Next.js rewrite, dsb.), endpoint ini
+// langsung mengembalikan job_id; frontend polling GET /api/quiz/jobs/:id.
 func (s *Server) postQuizGenerate(c fiber.Ctx) error {
 	var materi, provider string
 	var jumlah int
@@ -321,22 +327,99 @@ func (s *Server) postQuizGenerate(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusNotImplemented).JSON(fiber.Map{"error": err.Error()})
 	}
+
+	job := &quizJob{status: "processing", createdAt: time.Now()}
+	quizJobs.Store(job.id(), job)
+	go s.runQuizJob(job, ac, materi, jumlah, kesulitan)
+	// 202: langsung kembali, hasil diambil via polling.
+	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"job_id": job.id()})
+}
+
+// quizJob adalah satu pekerjaan generate soal yang berjalan di background.
+type quizJob struct {
+	mu        sync.Mutex
+	jobID     string
+	status    string // "processing" | "done" | "error"
+	questions []QuizQuestion
+	errMsg    string
+	createdAt time.Time
+}
+
+func (j *quizJob) id() string {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.jobID == "" {
+		var b [16]byte
+		rand.Read(b[:])
+		j.jobID = hex.EncodeToString(b[:])
+	}
+	return j.jobID
+}
+
+func (j *quizJob) finish(qs []QuizQuestion, errMsg string) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if errMsg != "" {
+		j.status = "error"
+		j.errMsg = errMsg
+	} else {
+		j.status = "done"
+		j.questions = qs
+	}
+}
+
+func (j *quizJob) snapshot() (status string, qs []QuizQuestion, errMsg string) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.status, j.questions, j.errMsg
+}
+
+// quizJobs menyimpan job yang aktif. In-memory: cukup untuk 1 instance;
+// job kedaluwarsa 30 menit dan dibersihkan saat diakses.
+var quizJobs sync.Map // jobID -> *quizJob
+
+func (s *Server) runQuizJob(job *quizJob, ac aiConf, materi string, jumlah int, kesulitan string) {
 	userPrompt := fmt.Sprintf(
 		"Buat %d soal pilihan ganda dengan tingkat kesulitan \"%s\" dari materi berikut:\n\n%s",
 		jumlah, kesulitan, materi)
-	ctx, cancel := context.WithTimeout(c.RequestCtx(), time.Duration(s.cfg.AITimeoutSec)*time.Second)
+	// Background: tidak terikat request HTTP (client boleh disconnect).
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(s.cfg.AITimeoutSec)*time.Second)
 	defer cancel()
 	raw, err := s.callAIChat(ctx, ac, quizSystemPrompt, userPrompt)
 	if err != nil {
-		s.log.Warn("quiz generate gagal", zapErr(err))
-		return fiber.NewError(fiber.StatusBadGateway, "gagal meminta AI: "+err.Error())
+		s.log.Warn("quiz job gagal", zapErr(err))
+		job.finish(nil, "gagal meminta AI: "+err.Error())
+		return
 	}
 	qs, err := validateQuizQuestions(json.RawMessage(raw))
 	if err != nil {
-		s.log.Warn("quiz generate: JSON AI tidak valid", zapErr(err))
-		return fiber.NewError(fiber.StatusBadGateway, "AI mengembalikan format yang tidak valid, coba lagi: "+err.Error())
+		s.log.Warn("quiz job: JSON AI tidak valid", zapErr(err))
+		job.finish(nil, "AI mengembalikan format yang tidak valid, coba lagi")
+		return
 	}
-	return c.JSON(fiber.Map{"questions": qs})
+	job.finish(qs, "")
+}
+
+// GET /api/quiz/jobs/:id -> {status} | {status:"done", questions} | {status:"error", error}
+func (s *Server) getQuizJob(c fiber.Ctx) error {
+	v, ok := quizJobs.Load(c.Params("id"))
+	if !ok {
+		return fiber.NewError(fiber.StatusNotFound, "job tidak ditemukan / kedaluwarsa")
+	}
+	job := v.(*quizJob)
+	if time.Since(job.createdAt) > 30*time.Minute {
+		quizJobs.Delete(c.Params("id"))
+		return fiber.NewError(fiber.StatusNotFound, "job tidak ditemukan / kedaluwarsa")
+	}
+	status, qs, errMsg := job.snapshot()
+	switch status {
+	case "done":
+		return c.JSON(fiber.Map{"status": "done", "questions": qs})
+	case "error":
+		return c.JSON(fiber.Map{"status": "error", "error": errMsg})
+	default:
+		return c.JSON(fiber.Map{"status": "processing"})
+	}
 }
 
 // POST /api/quiz/validate  {raw: "<teks JSON>"} -> {questions}
