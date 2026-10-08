@@ -32,9 +32,10 @@ func (s *Server) tmpExport(c fiber.Ctx) error {
 	if t := strings.ToLower(strings.TrimSpace(c.Query("table"))); t != "" {
 		tables = []string{t}
 	}
+	wantSeq := c.Query("sequences") != ""
 	c.Set("Content-Type", "application/sql")
 	c.Set("Content-Disposition", `attachment; filename="elearning-data.sql"`)
-	c.Context().SetBodyStreamWriter(func(w *bufio.Writer) {
+	return c.SendStreamWriter(func(w *bufio.Writer) {
 		ctx := context.Background()
 		conn, err := s.pool.Acquire(ctx)
 		if err != nil {
@@ -62,7 +63,7 @@ func (s *Server) tmpExport(c fiber.Ctx) error {
 			}
 			fmt.Fprintf(w, "\\.\n")
 		}
-		if c.Query("sequences") != "" {
+		if wantSeq {
 			rows, err := conn.Query(ctx, `
 				SELECT format('SELECT pg_catalog.setval(%L, COALESCE((SELECT MAX(%I) FROM %I.%I), 1), true);',
 					n.nspname||'.'||c.relname, a.attname, n.nspname, t.relname)
@@ -86,5 +87,4 @@ func (s *Server) tmpExport(c fiber.Ctx) error {
 			}
 		}
 	})
-	return nil
 }
