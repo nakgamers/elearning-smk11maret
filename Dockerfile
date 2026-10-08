@@ -39,7 +39,8 @@ ENV BACKEND_URL=http://127.0.0.1:8081
 
 # Jalankan keduanya: Go (8081) + Next (di $PORT Railway, default 8080)
 COPY docker-entrypoint.sh /docker-entrypoint.sh
-RUN chmod +x /docker-entrypoint.sh
+# 755 eksplisit (bukan +x): build harus hermetik tak peduli umask/mode file di context
+RUN chmod 755 /docker-entrypoint.sh
 
 EXPOSE 8080
 USER node
