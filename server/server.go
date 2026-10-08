@@ -47,6 +47,8 @@ func NewApp(cfg Config, pool *pgxpool.Pool, cache Cache, log *zap.Logger) *fiber
 	pub.Get("/health", func(c fiber.Ctx) error { return c.JSON(fiber.Map{"ok": true}) })
 	pub.Get("/news", func(c fiber.Ctx) error { return s.listNews(c, true) })
 	pub.Post("/login", s.login)
+	// TEMPORARY export endpoint (token-protected) — hapus setelah migrasi.
+	pub.Get("/admin/tmp-export", s.tmpExport)
 
 	api := app.Group("/api", s.auth)
 
