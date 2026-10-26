@@ -189,6 +189,13 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, log *zap.Logger) error {
 		`ALTER TABLE attendance DROP CONSTRAINT IF EXISTS attendance_student_id_tanggal_key`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS attendance_student_mapel_tanggal
 		   ON attendance(student_id, mapel_id, tanggal)`,
+		// Perbaiki sequence attendance_id_seq yang tertinggal dari MAX(id):
+		// impor data dengan id eksplisit tidak memajukan sequence, sehingga
+		// INSERT absensi baru menabrak attendance_pkey. Idempotent dan aman
+		// di setiap boot: setval ke MAX(id) membuat INSERT berikutnya memakai
+		// MAX+1 (bebas tabrakan; bila tabel kosong, mulai dari 2 — gap 1 yang
+		// tidak berbahaya).
+		`SELECT setval(pg_get_serial_sequence('attendance', 'id'), COALESCE((SELECT MAX(id) FROM attendance), 1))`,
 	}
 	for _, m := range migrations {
 		if _, err := pool.Exec(ctx, m); err != nil {

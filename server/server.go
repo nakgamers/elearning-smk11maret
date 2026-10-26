@@ -1048,7 +1048,11 @@ func (s *Server) studentCheckin(c fiber.Ctx) error {
 		`INSERT INTO attendance(student_id,mapel_id,tanggal,status,keterangan) VALUES($1,0,$2::date,'hadir',$3)
 		 ON CONFLICT(student_id,mapel_id,tanggal) DO NOTHING`, cl.UID, today, b.Keterangan)
 	if err != nil {
-		return err
+		// Jangan bocorkan error DB mentah ke klien (sebelumnya tampil
+		// "duplicate key ... attendance_pkey" di layar siswa). Log mentah
+		// tetap disimpan di sisi server untuk debugging.
+		s.log.Error("studentCheckin gagal", zap.Error(err), zap.Int64("student", cl.UID))
+		return c.Status(fiber.StatusInternalServerError).SendString("Gagal menyimpan absensi, silakan coba lagi.")
 	}
 	return c.JSON(fiber.Map{"ok": true, "tanggal": today})
 }
