@@ -99,6 +99,8 @@ func NewApp(cfg Config, pool *pgxpool.Pool, cache Cache, log *zap.Logger) *fiber
 	api.Post("/exams/:id/deactivate", adminGuru, s.deactivateExam)
 	api.Get("/exams/:id/questions", adminGuru, s.listQuestions)
 	api.Delete("/exams/:id/questions/:qid", adminGuru, s.deleteQuestion)
+	api.Get("/exams/:id/results", adminGuru, s.listExamResults)
+	api.Delete("/exams/:id/attempts/:aid", adminGuru, s.resetAttempt)
 	// Kuis AI (sesi kelas di IFP): generate via AI atau validasi JSON tempelan.
 	api.Post("/quiz/generate", adminGuru, s.postQuizGenerate)
 	api.Get("/quiz/jobs/:id", adminGuru, s.getQuizJob)
@@ -1497,6 +1499,50 @@ func (s *Server) deleteQuestion(c fiber.Ctx) error {
 		return c.Status(fiber.StatusNotFound).SendString("Soal tidak ditemukan.")
 	}
 	s.cache.Del(ctx, examKey(eid))
+	return c.JSON(fiber.Map{"ok": true})
+}
+
+// Hasil ujian per siswa (admin/guru): attempt yang sudah dimulai saja
+// (siswa yang belum pernah mulai tidak punya attempt).
+func (s *Server) listExamResults(c fiber.Ctx) error {
+	eid, _ := strconv.ParseInt(c.Params("id"), 10, 64)
+	rows, err := s.pool.Query(c.RequestCtx(),
+		`SELECT att.id,st.nis,st.nama,st.kelas,att.status,att.skor,att.mulai_at,att.selesai_at
+		 FROM attempts att JOIN students st ON st.id=att.student_id
+		 WHERE att.exam_id=$1 ORDER BY st.kelas,st.nis`, eid)
+	if err != nil {
+		s.log.Error("list exam results gagal", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).SendString("Gagal memuat hasil, silakan coba lagi.")
+	}
+	defer rows.Close()
+	out := []fiber.Map{}
+	for rows.Next() {
+		var id int64
+		var nis, nama, kelas, status string
+		var skor *int
+		var mulai time.Time
+		var selesai *time.Time
+		rows.Scan(&id, &nis, &nama, &kelas, &status, &skor, &mulai, &selesai)
+		out = append(out, fiber.Map{"id": id, "nis": nis, "nama": nama, "kelas": kelas,
+			"status": status, "skor": skor, "mulai_at": mulai, "selesai_at": selesai})
+	}
+	return c.JSON(out)
+}
+
+// Reset attempt siswa: hapus attempt + jawabannya (CASCADE) → siswa bisa
+// mulai dari nol. Sinyal cheat (per siswa+ujian, bukan per attempt) tidak
+// ikut dihapus — itu riwayat, bukan penghalang mengulang.
+func (s *Server) resetAttempt(c fiber.Ctx) error {
+	eid, _ := strconv.ParseInt(c.Params("id"), 10, 64)
+	aid, _ := strconv.ParseInt(c.Params("aid"), 10, 64)
+	tag, err := s.pool.Exec(c.RequestCtx(), `DELETE FROM attempts WHERE id=$1 AND exam_id=$2`, aid, eid)
+	if err != nil {
+		s.log.Error("reset attempt gagal", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).SendString("Gagal mereset, silakan coba lagi.")
+	}
+	if tag.RowsAffected() == 0 {
+		return c.Status(fiber.StatusNotFound).SendString("Attempt tidak ditemukan.")
+	}
 	return c.JSON(fiber.Map{"ok": true})
 }
 

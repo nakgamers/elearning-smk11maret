@@ -501,6 +501,9 @@ function Ujian() {
   const [viewId, setViewId] = useState(null)
   const [viewQs, setViewQs] = useState([])
   const [viewMsg, setViewMsg] = useState('')
+  const [resultsId, setResultsId] = useState(null)
+  const [results, setResults] = useState([])
+  const [resultsMsg, setResultsMsg] = useState('')
 
   // datetime-local (waktu lokal browser) -> RFC3339 UTC untuk backend
   function toISO(v) { return v ? new Date(v).toISOString() : '' }
@@ -587,6 +590,24 @@ function Ujian() {
     catch (e) { setViewMsg('❌ ' + e.message) }
   }
 
+  async function loadResults(id) {
+    setResultsId(id)
+    setResultsMsg('')
+    try { setResults(await api.get(`/exams/${id}/results`)) }
+    catch (e) { setResultsMsg('❌ ' + e.message); setResults([]) }
+  }
+
+  async function resetAtt(a) {
+    if (!confirm(`Reset ujian untuk ${a.nama}? Nilai dan jawaban yang sudah ada akan hilang, siswa bisa mulai dari nol.`)) return
+    try { await api.del(`/exams/${resultsId}/attempts/${a.id}`); setResults(await api.get(`/exams/${resultsId}/results`)) }
+    catch (e) { setResultsMsg('❌ ' + e.message) }
+  }
+
+  function fmtTime(d) {
+    if (!d) return '—'
+    return new Date(d).toLocaleString('id-ID', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+  }
+
   return (
     <div style={{ display: 'grid', gap: 14 }}>
       <form className="card" style={{ padding: 18, display: 'grid', gap: 12 }} onSubmit={submit}>
@@ -662,6 +683,7 @@ function Ujian() {
               <td>
                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                   <button className="btn btn-ghost" style={{ padding: '4px 8px', fontSize: 11.5 }} onClick={() => loadQs(x.id)}>Lihat soal</button>
+                  <button className="btn btn-ghost" style={{ padding: '4px 8px', fontSize: 11.5 }} onClick={() => loadResults(x.id)}>Hasil</button>
                   <button className="btn btn-ghost" style={{ padding: '4px 8px', fontSize: 11.5 }} onClick={() => setImportFor(x.id)}>Import soal</button>
                   <button className="btn btn-primary" style={{ padding: '4px 10px', fontSize: 11.5 }} onClick={() => toggleActive(x)}>{x.aktif ? 'Nonaktifkan' : 'Aktifkan'}</button>
                   <button className="btn btn-ghost" style={{ padding: '4px 8px', fontSize: 11.5 }} onClick={() => startEdit(x)}>Edit</button>
@@ -704,6 +726,32 @@ function Ujian() {
               </div>
             ))}
             <div><button className="btn btn-ghost" style={{ padding: '6px 14px', fontSize: 13 }} onClick={() => setViewId(null)}>Tutup</button></div>
+          </div>
+        )}
+
+        {resultsId != null && (
+          <div style={{ marginTop: 14, background: '#f8fafc', padding: 14, borderRadius: 12, display: 'grid', gap: 10 }}>
+            <div style={{ fontWeight: 600, fontSize: 14 }}>Hasil ujian ({results.length} siswa sudah mulai)</div>
+            {resultsMsg && <div style={{ fontSize: 13 }}>{resultsMsg}</div>}
+            {results.length === 0 && <div style={{ fontSize: 13 }}>Belum ada siswa yang mengerjakan.</div>}
+            {results.length > 0 && (
+              <table className="tbl">
+                <thead><tr><th>NIS</th><th>Nama</th><th>Kelas</th><th>Status</th><th>Skor</th><th>Mulai</th><th>Selesai</th><th>Aksi</th></tr></thead>
+                <tbody>{results.map((a) => (
+                  <tr key={a.id}>
+                    <td>{a.nis}</td>
+                    <td>{a.nama}</td>
+                    <td>{a.kelas}</td>
+                    <td>{a.status === 'selesai' ? <span className="badge" style={{ background: '#dcfce7', color: '#15803d' }}>Selesai</span> : <span className="badge" style={{ background: '#fef9c3', color: '#854d0e' }}>Berjalan</span>}</td>
+                    <td>{a.skor == null ? '—' : `${a.skor}%`}</td>
+                    <td>{fmtTime(a.mulai_at)}</td>
+                    <td>{fmtTime(a.selesai_at)}</td>
+                    <td><button className="btn btn-ghost" style={{ padding: '4px 8px', fontSize: 11.5, color: '#dc2626' }} onClick={() => resetAtt(a)}>Reset</button></td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            )}
+            <div><button className="btn btn-ghost" style={{ padding: '6px 14px', fontSize: 13 }} onClick={() => setResultsId(null)}>Tutup</button></div>
           </div>
         )}
       </div>
