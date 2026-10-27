@@ -428,16 +428,52 @@ function Ujian() {
   const [importFor, setImportFor] = useState(null)
   const [impFile, setImpFile] = useState(null)
   const [impMsg, setImpMsg] = useState('')
+  const [editId, setEditId] = useState(null)
+  const [viewId, setViewId] = useState(null)
+  const [viewQs, setViewQs] = useState([])
+  const [viewMsg, setViewMsg] = useState('')
+
+  // datetime-local (waktu lokal browser) -> RFC3339 UTC untuk backend
+  function toISO(v) { return v ? new Date(v).toISOString() : '' }
+  // RFC3339 dari backend -> datetime-local (waktu lokal browser)
+  function toLocalInput(iso) {
+    if (!iso) return ''
+    const d = new Date(iso)
+    const p = (n) => String(n).padStart(2, '0')
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`
+  }
+
+  function resetForm() {
+    setF({ nama: '', mapel_id: '', cp_id: '', kelas: '', durasi_menit: '60', mulai_at: '', selesai_at: '', acak_soal: false })
+  }
 
   async function submit(e) {
     e.preventDefault()
     setMsg('')
+    const payload = { ...f, mapel_id: +f.mapel_id, cp_id: +f.cp_id || 0, durasi_menit: +f.durasi_menit, mulai_at: toISO(f.mulai_at), selesai_at: toISO(f.selesai_at) }
     try {
-      await api.post('/exams', { ...f, mapel_id: +f.mapel_id, cp_id: +f.cp_id || 0, durasi_menit: +f.durasi_menit })
-      setMsg('✅ Ujian dibuat.')
-      setF({ nama: '', mapel_id: '', cp_id: '', kelas: '', durasi_menit: '60', mulai_at: '', selesai_at: '', acak_soal: false })
+      if (editId) {
+        await api.put(`/exams/${editId}`, payload)
+        setMsg('✅ Ujian diubah.')
+      } else {
+        await api.post('/exams', payload)
+        setMsg('✅ Ujian dibuat.')
+      }
+      resetForm()
+      setEditId(null)
       reload()
     } catch (e) { setMsg('❌ ' + e.message) }
+  }
+
+  function startEdit(x) {
+    setF({ nama: x.nama, mapel_id: String(x.mapel_id ?? ''), cp_id: String(x.cp_id ?? ''), kelas: x.kelas || '', durasi_menit: String(x.durasi_menit), mulai_at: toLocalInput(x.mulai_at), selesai_at: toLocalInput(x.selesai_at), acak_soal: !!x.acak_soal })
+    setEditId(x.id)
+    setMsg('')
+  }
+
+  function cancelEdit() {
+    setEditId(null)
+    resetForm()
   }
 
   async function doImport() {
@@ -450,16 +486,42 @@ function Ujian() {
     reload()
   }
 
-  async function activate(id) {
-    const r = await api.post(`/exams/${id}/activate`, {})
-    setMsg(`✅ Ujian aktif, ${r.cached} soal masuk cache.`)
-    reload()
+  async function toggleActive(x) {
+    try {
+      if (x.aktif) {
+        await api.post(`/exams/${x.id}/deactivate`, {})
+        setMsg('✅ Ujian dinonaktifkan, hilang dari daftar siswa.')
+      } else {
+        const r = await api.post(`/exams/${x.id}/activate`, {})
+        setMsg(`✅ Ujian aktif, ${r.cached} soal masuk cache.`)
+      }
+      reload()
+    } catch (e) { setMsg('❌ ' + e.message) }
+  }
+
+  async function removeExam(x) {
+    if (!confirm(`Hapus ujian "${x.nama}"? Soal di dalamnya ikut terhapus.`)) return
+    try { await api.del(`/exams/${x.id}`); setMsg('✅ Ujian dihapus.'); reload() }
+    catch (e) { setMsg('❌ ' + e.message) }
+  }
+
+  async function loadQs(id) {
+    setViewId(id)
+    setViewMsg('')
+    try { setViewQs(await api.get(`/exams/${id}/questions`)) }
+    catch (e) { setViewMsg('❌ ' + e.message); setViewQs([]) }
+  }
+
+  async function delQs(qid) {
+    if (!confirm('Hapus soal ini?')) return
+    try { await api.del(`/exams/${viewId}/questions/${qid}`); setViewQs(await api.get(`/exams/${viewId}/questions`)); reload() }
+    catch (e) { setViewMsg('❌ ' + e.message) }
   }
 
   return (
     <div style={{ display: 'grid', gap: 14 }}>
       <form className="card" style={{ padding: 18, display: 'grid', gap: 12 }} onSubmit={submit}>
-        <div style={{ fontWeight: 700 }}>Buat Ujian</div>
+        <div style={{ fontWeight: 700 }}>{editId ? 'Edit Ujian' : 'Buat Ujian'}</div>
         <div className="grid-2">
           <div>
             <label className="label">Nama ujian</label>
@@ -493,8 +555,26 @@ function Ujian() {
             </select>
           </div>
         </div>
+        <div className="grid-3">
+          <div>
+            <label className="label">Mulai (opsional)</label>
+            <input className="input" type="datetime-local" value={f.mulai_at} onChange={(e) => setF({ ...f, mulai_at: e.target.value })} />
+          </div>
+          <div>
+            <label className="label">Selesai (opsional)</label>
+            <input className="input" type="datetime-local" value={f.selesai_at} onChange={(e) => setF({ ...f, selesai_at: e.target.value })} />
+          </div>
+          <div style={{ display: 'flex', alignItems: 'end', paddingBottom: 8 }}>
+            <label style={{ fontSize: 14, display: 'flex', gap: 8, alignItems: 'center' }}>
+              <input type="checkbox" checked={f.acak_soal} onChange={(e) => setF({ ...f, acak_soal: e.target.checked })} /> Acak urutan soal per siswa
+            </label>
+          </div>
+        </div>
         {msg && <div style={{ fontSize: 14 }}>{msg}</div>}
-        <button className="btn btn-primary" style={{ justifySelf: 'start' }}>Buat Ujian</button>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button className="btn btn-primary" style={{ justifySelf: 'start' }}>{editId ? 'Simpan perubahan' : 'Buat Ujian'}</button>
+          {editId && <button type="button" className="btn btn-ghost" onClick={cancelEdit}>Batal edit</button>}
+        </div>
       </form>
 
       <div className="card" style={{ padding: 16 }}>
@@ -512,8 +592,11 @@ function Ujian() {
               <td>{x.aktif ? <span className="badge" style={{ background: '#dcfce7', color: '#15803d' }}>Aktif</span> : <span className="badge" style={{ background: '#f1f5f9', color: '#64748b' }}>Draft</span>}</td>
               <td>
                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                  <button className="btn btn-ghost" style={{ padding: '4px 8px', fontSize: 11.5 }} onClick={() => loadQs(x.id)}>Lihat soal</button>
                   <button className="btn btn-ghost" style={{ padding: '4px 8px', fontSize: 11.5 }} onClick={() => setImportFor(x.id)}>Import soal</button>
-                  <button className="btn btn-primary" style={{ padding: '4px 10px', fontSize: 11.5 }} onClick={() => activate(x.id)}>Aktifkan</button>
+                  <button className="btn btn-primary" style={{ padding: '4px 10px', fontSize: 11.5 }} onClick={() => toggleActive(x)}>{x.aktif ? 'Nonaktifkan' : 'Aktifkan'}</button>
+                  <button className="btn btn-ghost" style={{ padding: '4px 8px', fontSize: 11.5 }} onClick={() => startEdit(x)}>Edit</button>
+                  <button className="btn btn-ghost" style={{ padding: '4px 8px', fontSize: 11.5, color: '#dc2626' }} onClick={() => removeExam(x)}>Hapus</button>
                 </div>
               </td>
             </tr>
@@ -529,6 +612,29 @@ function Ujian() {
               <button className="btn btn-primary" style={{ padding: '6px 14px', fontSize: 13 }} onClick={doImport}>Unggah soal</button>
               <button className="btn btn-ghost" style={{ padding: '6px 14px', fontSize: 13 }} onClick={() => setImportFor(null)}>Batal</button>
             </div>
+          </div>
+        )}
+
+        {viewId != null && (
+          <div style={{ marginTop: 14, background: '#f8fafc', padding: 14, borderRadius: 12, display: 'grid', gap: 10 }}>
+            <div style={{ fontWeight: 600, fontSize: 14 }}>Soal ujian ({viewQs.length} soal)</div>
+            {viewMsg && <div style={{ fontSize: 13 }}>{viewMsg}</div>}
+            {viewQs.length === 0 && <div style={{ fontSize: 13 }}>Belum ada soal. Pakai tombol Import soal.</div>}
+            {viewQs.map((q, i) => (
+              <div key={q.id} style={{ background: '#fff', padding: 10, borderRadius: 8, display: 'grid', gap: 6 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                  <div style={{ fontSize: 13.5 }}><b>{i + 1}.</b> {q.soal}</div>
+                  <button className="btn btn-ghost" style={{ padding: '2px 8px', fontSize: 11.5, color: '#dc2626', flexShrink: 0 }} onClick={() => delQs(q.id)}>Hapus</button>
+                </div>
+                <div style={{ fontSize: 13, display: 'grid', gap: 2 }}>
+                  {q.opsi.map((o, j) => (
+                    <div key={j} style={j === q.kunci ? { fontWeight: 700, color: '#15803d' } : {}}>{'ABCDE'[j]}. {o}{j === q.kunci ? ' ✅' : ''}</div>
+                  ))}
+                </div>
+                <div style={{ fontSize: 12, color: '#64748b' }}>Bobot: {q.bobot}</div>
+              </div>
+            ))}
+            <div><button className="btn btn-ghost" style={{ padding: '6px 14px', fontSize: 13 }} onClick={() => setViewId(null)}>Tutup</button></div>
           </div>
         )}
       </div>

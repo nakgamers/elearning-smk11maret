@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -91,6 +92,11 @@ func NewApp(cfg Config, pool *pgxpool.Pool, cache Cache, log *zap.Logger) *fiber
 	api.Post("/exams", adminGuru, s.createExam)
 	api.Post("/exams/:id/questions/import", adminGuru, s.importQuestions)
 	api.Post("/exams/:id/activate", adminGuru, s.activateExam) // pre-load ke cache
+	api.Put("/exams/:id", adminGuru, s.updateExam)
+	api.Delete("/exams/:id", adminGuru, s.deleteExam)
+	api.Post("/exams/:id/deactivate", adminGuru, s.deactivateExam)
+	api.Get("/exams/:id/questions", adminGuru, s.listQuestions)
+	api.Delete("/exams/:id/questions/:qid", adminGuru, s.deleteQuestion)
 	// Kuis AI (sesi kelas di IFP): generate via AI atau validasi JSON tempelan.
 	api.Post("/quiz/generate", adminGuru, s.postQuizGenerate)
 	api.Get("/quiz/jobs/:id", adminGuru, s.getQuizJob)
@@ -1153,6 +1159,7 @@ func (s *Server) toggleNews(c fiber.Ctx) error {
 func (s *Server) listExams(c fiber.Ctx) error {
 	rows, err := s.pool.Query(c.RequestCtx(),
 		`SELECT e.id,e.nama,e.kelas,e.durasi_menit,e.mulai_at,e.selesai_at,e.aktif,e.acak_soal,u.nama,s.nama,
+		        e.mapel_id,e.cp_id,
 		        (SELECT count(*) FROM questions q WHERE q.exam_id=e.id)
 		 FROM exams e JOIN users u ON u.id=e.guru_id JOIN subjects s ON s.id=e.mapel_id ORDER BY e.created_at DESC`)
 	if err != nil {
@@ -1167,10 +1174,12 @@ func (s *Server) listExams(c fiber.Ctx) error {
 		var mulai, selesai *time.Time
 		var aktif, acak bool
 		var nq int
-		rows.Scan(&id, &nama, &kelas, &dur, &mulai, &selesai, &aktif, &acak, &guru, &mapel, &nq)
+		var mapelID int64
+		var cpID *int64
+		rows.Scan(&id, &nama, &kelas, &dur, &mulai, &selesai, &aktif, &acak, &guru, &mapel, &mapelID, &cpID, &nq)
 		out = append(out, fiber.Map{"id": id, "nama": nama, "kelas": kelas, "durasi_menit": dur,
 			"mulai_at": mulai, "selesai_at": selesai, "aktif": aktif, "acak_soal": acak,
-			"guru": guru, "mapel": mapel, "jumlah_soal": nq})
+			"guru": guru, "mapel": mapel, "mapel_id": mapelID, "cp_id": cpID, "jumlah_soal": nq})
 	}
 	return c.JSON(out)
 }
@@ -1287,6 +1296,127 @@ func (s *Server) activateExam(c fiber.Ctx) error {
 	s.cache.Set(ctx, examKey(eid), string(b), 6*time.Hour)
 	s.log.Info("soal pre-loaded ke cache", zap.Int64("exam", eid), zap.Int("n", len(qs)))
 	return c.JSON(fiber.Map{"ok": true, "cached": len(qs)})
+}
+
+// Edit ujian (admin/guru): ubah metadata saja, soal tidak berubah → cache tetap valid.
+func (s *Server) updateExam(c fiber.Ctx) error {
+	eid, _ := strconv.ParseInt(c.Params("id"), 10, 64)
+	var b struct {
+		Nama    string `json:"nama"`
+		MapelID int64  `json:"mapel_id"`
+		CpID    int64  `json:"cp_id"`
+		Kelas   string `json:"kelas"`
+		Durasi  int    `json:"durasi_menit"`
+		Mulai   string `json:"mulai_at"`
+		Selesai string `json:"selesai_at"`
+		Acak    bool   `json:"acak_soal"`
+	}
+	if err := c.Bind().Body(&b); err != nil || b.Nama == "" || b.MapelID == 0 || b.Durasi <= 0 {
+		return fiber.ErrBadRequest
+	}
+	var mulai, selesai *time.Time
+	if t, err := time.Parse(time.RFC3339, b.Mulai); err == nil {
+		mulai = &t
+	}
+	if t, err := time.Parse(time.RFC3339, b.Selesai); err == nil {
+		selesai = &t
+	}
+	tag, err := s.pool.Exec(c.RequestCtx(),
+		`UPDATE exams SET nama=$1,mapel_id=$2,cp_id=NULLIF($3,0),kelas=$4,durasi_menit=$5,
+		 mulai_at=$6,selesai_at=$7,acak_soal=$8 WHERE id=$9`,
+		b.Nama, b.MapelID, b.CpID, b.Kelas, b.Durasi, mulai, selesai, b.Acak, eid)
+	if err != nil {
+		s.log.Error("update exam gagal", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).SendString("Gagal mengubah ujian, silakan coba lagi.")
+	}
+	if tag.RowsAffected() == 0 {
+		return c.Status(fiber.StatusNotFound).SendString("Ujian tidak ditemukan.")
+	}
+	return c.JSON(fiber.Map{"ok": true})
+}
+
+// Nonaktifkan ujian: hilang dari daftar siswa + cache soal dibuang.
+func (s *Server) deactivateExam(c fiber.Ctx) error {
+	eid, _ := strconv.ParseInt(c.Params("id"), 10, 64)
+	ctx := c.RequestCtx()
+	tag, err := s.pool.Exec(ctx, `UPDATE exams SET aktif=FALSE WHERE id=$1`, eid)
+	if err != nil {
+		s.log.Error("deactivate exam gagal", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).SendString("Gagal menonaktifkan ujian, silakan coba lagi.")
+	}
+	if tag.RowsAffected() == 0 {
+		return c.Status(fiber.StatusNotFound).SendString("Ujian tidak ditemukan.")
+	}
+	s.cache.Del(ctx, examKey(eid))
+	return c.JSON(fiber.Map{"ok": true})
+}
+
+// Hapus ujian: DITOLAK bila sudah pernah dikerjakan — attempts/answers ikut terhapus
+// CASCADE, jadi menghapus ujian yang sudah dikerjakan = menghapus hasil siswa.
+func (s *Server) deleteExam(c fiber.Ctx) error {
+	eid, _ := strconv.ParseInt(c.Params("id"), 10, 64)
+	ctx := c.RequestCtx()
+	var n int
+	s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM attempts WHERE exam_id=$1`, eid).Scan(&n)
+	if n > 0 {
+		return c.Status(fiber.StatusBadRequest).SendString("Ujian sudah pernah dikerjakan siswa, tidak bisa dihapus.")
+	}
+	tag, err := s.pool.Exec(ctx, `DELETE FROM exams WHERE id=$1`, eid)
+	if err != nil {
+		s.log.Error("delete exam gagal", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).SendString("Gagal menghapus ujian, silakan coba lagi.")
+	}
+	if tag.RowsAffected() == 0 {
+		return c.Status(fiber.StatusNotFound).SendString("Ujian tidak ditemukan.")
+	}
+	s.cache.Del(ctx, examKey(eid))
+	return c.JSON(fiber.Map{"ok": true})
+}
+
+// Daftar soal satu ujian (admin/guru): untuk verifikasi hasil import.
+func (s *Server) listQuestions(c fiber.Ctx) error {
+	eid, _ := strconv.ParseInt(c.Params("id"), 10, 64)
+	rows, err := s.pool.Query(c.RequestCtx(),
+		`SELECT id,soal,opsi,kunci,bobot FROM questions WHERE exam_id=$1 ORDER BY id`, eid)
+	if err != nil {
+		s.log.Error("list questions gagal", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).SendString("Gagal memuat soal, silakan coba lagi.")
+	}
+	defer rows.Close()
+	out := []fiber.Map{}
+	for rows.Next() {
+		var id int64
+		var soal string
+		var oj []byte
+		var kunci, bobot int
+		rows.Scan(&id, &soal, &oj, &kunci, &bobot)
+		var opsi []string
+		json.Unmarshal(oj, &opsi)
+		out = append(out, fiber.Map{"id": id, "soal": soal, "opsi": opsi, "kunci": kunci, "bobot": bobot})
+	}
+	return c.JSON(out)
+}
+
+// Hapus satu soal: DITOLAK bila sudah dijawab siswa (answers ikut terhapus CASCADE).
+func (s *Server) deleteQuestion(c fiber.Ctx) error {
+	eid, _ := strconv.ParseInt(c.Params("id"), 10, 64)
+	qid, _ := strconv.ParseInt(c.Params("qid"), 10, 64)
+	ctx := c.RequestCtx()
+	var n int
+	s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM answers WHERE question_id=$1`, qid).Scan(&n)
+	if n > 0 {
+		return c.Status(fiber.StatusBadRequest).SendString("Soal sudah dijawab siswa, tidak bisa dihapus.")
+	}
+	tag, err := s.pool.Exec(ctx, `DELETE FROM questions WHERE id=$1 AND exam_id=$2`, qid, eid)
+	if err != nil {
+		s.log.Error("delete question gagal", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).SendString("Gagal menghapus soal, silakan coba lagi.")
+	}
+	if tag.RowsAffected() == 0 {
+		return c.Status(fiber.StatusNotFound).SendString("Soal tidak ditemukan.")
+	}
+	s.cache.Del(ctx, examKey(eid))
+	return c.JSON(fiber.Map{"ok": true})
 }
 
 func examKey(id int64) string { return fmt.Sprintf("exam:%d:questions", id) }
@@ -1477,6 +1607,13 @@ func (s *Server) startExam(c fiber.Ctx) error {
 	eid, _ := strconv.ParseInt(c.Params("id"), 10, 64)
 	ctx := c.RequestCtx()
 
+	// Ujian non-aktif (Draft / dinonaktifkan) tidak boleh dimulai — daftar siswa
+	// memang hanya menampilkan yang aktif, jadi ini menutup celah tebak ID.
+	var aktif bool
+	if err := s.pool.QueryRow(ctx, `SELECT aktif FROM exams WHERE id=$1`, eid).Scan(&aktif); err != nil || !aktif {
+		return c.Status(fiber.StatusBadRequest).SendString("Ujian belum aktif.")
+	}
+
 	// Ambil soal dari cache dulu (master plan §2.1), fallback Postgres.
 	type cachedQ struct {
 		ID   int64    `json:"id"`
@@ -1552,6 +1689,15 @@ func (s *Server) startExam(c fiber.Ctx) error {
 			mine = v
 		}
 		out = append(out, outQ{q.ID, q.Soal, q.Opsi, mine})
+	}
+	// Acak urutan soal per siswa bila ujian diset acak_soal. Deterministik per
+	// attempt (seed = attempt ID) → urutan stabil saat resume, beda antar siswa.
+	// Aman: jawaban & nilai terikat question_id, bukan posisi.
+	var acak bool
+	s.pool.QueryRow(ctx, `SELECT acak_soal FROM exams WHERE id=$1`, eid).Scan(&acak)
+	if acak {
+		r := rand.New(rand.NewSource(attID))
+		r.Shuffle(len(out), func(i, j int) { out[i], out[j] = out[j], out[i] })
 	}
 	return c.JSON(fiber.Map{"attempt_id": attID, "durasi_menit": dur, "mulai_at": mulaiAt, "questions": out})
 }
