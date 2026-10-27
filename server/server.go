@@ -101,6 +101,7 @@ func NewApp(cfg Config, pool *pgxpool.Pool, cache Cache, log *zap.Logger) *fiber
 	api.Get("/exams/:id/questions", adminGuru, s.listQuestions)
 	api.Delete("/exams/:id/questions/:qid", adminGuru, s.deleteQuestion)
 	api.Get("/exams/:id/results", adminGuru, s.listExamResults)
+	api.Get("/exams/:id/results/export", adminGuru, s.exportExamResults)
 	api.Delete("/exams/:id/attempts/:aid", adminGuru, s.resetAttempt)
 	// Kuis AI (sesi kelas di IFP): generate via AI atau validasi JSON tempelan.
 	api.Post("/quiz/generate", adminGuru, s.postQuizGenerate)
@@ -1557,6 +1558,35 @@ func (s *Server) listExamResults(c fiber.Ctx) error {
 	return c.JSON(out)
 }
 
+// Export hasil ujian ke xlsx: cukup NAMA | KELAS | NILAI. Siswa yang
+// belum selesai (skor NULL) ikut terdaftar dengan NILAI kosong — bukan 0.
+func (s *Server) exportExamResults(c fiber.Ctx) error {
+	eid, _ := strconv.ParseInt(c.Params("id"), 10, 64)
+	rows, err := s.pool.Query(c.RequestCtx(),
+		`SELECT st.nama,st.kelas,att.skor FROM attempts att JOIN students st ON st.id=att.student_id
+		 WHERE att.exam_id=$1 ORDER BY st.kelas,st.nama`, eid)
+	if err != nil {
+		s.log.Error("export hasil ujian gagal", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).SendString("Gagal mengekspor, silakan coba lagi.")
+	}
+	defer rows.Close()
+	data := []ExamResultRow{}
+	for rows.Next() {
+		var r ExamResultRow
+		rows.Scan(&r.Nama, &r.Kelas, &r.Nilai)
+		data = append(data, r)
+	}
+	buf, err := examResultsXLSX(data)
+	if err != nil {
+		s.log.Error("buat xlsx hasil ujian gagal", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).SendString("Gagal mengekspor, silakan coba lagi.")
+	}
+	name := fmt.Sprintf("hasil-ujian-%d-%s.xlsx", eid, time.Now().Format("20060102-1504"))
+	c.Set("Content-Disposition", `attachment; filename="`+name+`"`)
+	c.Set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+	c.Send(buf)
+	return nil
+}
 // Reset attempt siswa: hapus attempt + jawabannya (CASCADE) → siswa bisa
 // mulai dari nol. Sinyal cheat (per siswa+ujian, bukan per attempt) tidak
 // ikut dihapus — itu riwayat, bukan penghalang mengulang.

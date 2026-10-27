@@ -73,7 +73,8 @@ export const api = {
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = ''
+    const m = res.headers.get('Content-Disposition')?.match(/filename="([^"]+)"/)
+    a.download = m ? m[1] : ''
     a.click()
     URL.revokeObjectURL(url)
   },

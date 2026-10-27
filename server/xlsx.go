@@ -68,4 +68,32 @@ func gradesXLSX(data []GradeRow) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+type ExamResultRow struct {
+	Nama, Kelas string
+	Nilai       *int
+}
+
+// Export hasil ujian: header NAMA | KELAS | NILAI saja.
+func examResultsXLSX(data []ExamResultRow) ([]byte, error) {
+	f := excelize.NewFile()
+	defer f.Close()
+	sheet := "Hasil"
+	f.SetSheetRow(sheet, "A1", &[]any{"NAMA", "KELAS", "NILAI"})
+	for i, r := range data {
+		var nilai any = ""
+		if r.Nilai != nil {
+			nilai = *r.Nilai
+		}
+		f.SetSheetRow(sheet, cellRow(i+2), &[]any{r.Nama, r.Kelas, nilai})
+	}
+	f.SetColWidth(sheet, "A", "A", 28)
+	f.SetColWidth(sheet, "B", "B", 22)
+	f.SetColWidth(sheet, "C", "C", 10)
+	var buf bytes.Buffer
+	if err := f.Write(&buf); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
 func cellRow(n int) string { return "A" + strconv.Itoa(n) }

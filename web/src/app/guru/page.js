@@ -731,7 +731,10 @@ function Ujian() {
 
         {resultsId != null && (
           <div style={{ marginTop: 14, background: '#f8fafc', padding: 14, borderRadius: 12, display: 'grid', gap: 10 }}>
-            <div style={{ fontWeight: 600, fontSize: 14 }}>Hasil ujian ({results.length} siswa sudah mulai)</div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={{ fontWeight: 600, fontSize: 14 }}>Hasil ujian ({results.length} siswa sudah mulai)</div>
+              <button className="btn btn-ghost" style={{ padding: '4px 10px', fontSize: 12 }} onClick={async () => { try { await api.download(`/exams/${resultsId}/results/export`) } catch (e) { setResultsMsg('❌ ' + e.message) } }}>⬇ Export Excel</button>
+            </div>
             {resultsMsg && <div style={{ fontSize: 13 }}>{resultsMsg}</div>}
             {results.length === 0 && <div style={{ fontSize: 13 }}>Belum ada siswa yang mengerjakan.</div>}
             {results.length > 0 && (
