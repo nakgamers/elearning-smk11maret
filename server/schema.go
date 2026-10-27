@@ -196,6 +196,10 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, log *zap.Logger) error {
 		// MAX+1 (bebas tabrakan; bila tabel kosong, mulai dari 2 — gap 1 yang
 		// tidak berbahaya).
 		`SELECT setval(pg_get_serial_sequence('attendance', 'id'), COALESCE((SELECT MAX(id) FROM attendance), 1))`,
+		// Login siswa pakai username SM1103... (kolom baru, opsional): NIS tetap
+		// apa adanya, username jadi pengenal login tambahan. UNIQUE; NULL untuk
+		// baris lama (NULL tidak dihitung duplikat oleh UNIQUE).
+		`ALTER TABLE students ADD COLUMN IF NOT EXISTS username TEXT UNIQUE`,
 	}
 	for _, m := range migrations {
 		if _, err := pool.Exec(ctx, m); err != nil {

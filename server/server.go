@@ -174,7 +174,7 @@ func (s *Server) login(c fiber.Ctx) error {
 	var sid int64
 	var snama, skelas, shash string
 	err := s.pool.QueryRow(ctx,
-		`SELECT id,nama,kelas,password_hash FROM students WHERE nis=$1 AND aktif`, body.Username).
+		`SELECT id,nama,kelas,password_hash FROM students WHERE (nis=$1 OR username=$1) AND aktif`, body.Username).
 		Scan(&sid, &snama, &skelas, &shash)
 	if err == nil && CheckPassword(shash, body.Password) {
 		tok := SignToken(s.cfg.Secret, sid, "siswa", 0, 12*time.Hour)
@@ -472,7 +472,6 @@ func (s *Server) importStudents(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
-	pw, _ := HashPassword("siswa123") // password default, siswa ganti lewat admin
 	imported, skipped := 0, 0
 	ctx := c.RequestCtx()
 	seen := []string{}
@@ -480,10 +479,22 @@ func (s *Server) importStudents(c fiber.Ctx) error {
 		if len(r) < 3 || r[0] == "" || r[1] == "" {
 			continue
 		}
+		// Kolom ke-5 (opsional): password per siswa; kosong = siswa123 dan
+		// password lama TIDAK diubah saat NIS sudah ada. Kolom ke-6
+		// (opsional): username login (mis. SM1103...); kosong = tidak diubah.
+		// NIS dibiarkan apa adanya (format file tidak diubah).
+		pwGiven := col(r, 4) != ""
+		pwText := col(r, 4)
+		if !pwGiven {
+			pwText = "siswa123"
+		}
+		pw, _ := HashPassword(pwText)
 		if _, err := s.pool.Exec(ctx,
-			`INSERT INTO students(nis,nama,kelas,jk,password_hash) VALUES($1,$2,$3,$4,$5)
-			 ON CONFLICT(nis) DO UPDATE SET nama=EXCLUDED.nama,kelas=EXCLUDED.kelas,jk=EXCLUDED.jk,aktif=TRUE`,
-			r[0], r[1], r[2], defJk(col(r, 3)), pw); err != nil {
+			`INSERT INTO students(nis,nama,kelas,jk,password_hash,username) VALUES($1,$2,$3,$4,$5,NULLIF($6,''))
+			 ON CONFLICT(nis) DO UPDATE SET nama=EXCLUDED.nama,kelas=EXCLUDED.kelas,jk=EXCLUDED.jk,aktif=TRUE,
+			 username=COALESCE(EXCLUDED.username, students.username),
+			 password_hash=CASE WHEN $7 THEN EXCLUDED.password_hash ELSE students.password_hash END`,
+			r[0], r[1], r[2], defJk(col(r, 3)), pw, col(r, 5), pwGiven); err != nil {
 			skipped++
 			continue
 		}
