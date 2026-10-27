@@ -3,7 +3,7 @@ import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { api, setSession } from '../lib/api'
 
-// Login SISWA — NIS + password. Petugas (guru/admin) punya halaman sendiri.
+// Login SISWA — username + password. Petugas (guru/admin) punya halaman sendiri.
 export default function LoginSiswa() {
   const router = useRouter()
   const [form, setForm] = useState({ username: '', password: '' })
@@ -23,7 +23,7 @@ export default function LoginSiswa() {
         setErr('Ini akun petugas (guru/admin). Gunakan menu "Login Guru & Admin".')
       }
     } catch (e) {
-      setErr(e.message === 'Unauthorized' ? 'NIS atau password salah.' : e.message)
+      setErr(e.message === 'Unauthorized' ? 'Username atau password salah.' : e.message)
     } finally {
       setLoading(false)
     }
@@ -35,13 +35,13 @@ export default function LoginSiswa() {
         <div className="auth-logo">11</div>
         <h1>SMK 11 MARET</h1>
         <span className="auth-badge">Portal Siswa</span>
-        <div className="auth-sub">Masuk dengan NIS untuk akses materi, tugas, absensi & ujian</div>
+        <div className="auth-sub">Masuk dengan username untuk akses materi, tugas, absensi & ujian</div>
 
         <form onSubmit={submit} autoComplete="off">
           <div className="field">
-            <label htmlFor="nis">NIS</label>
-            <input type="text" id="nis" value={form.username} autoFocus
-              placeholder="Nomor Induk Siswa" required
+            <label htmlFor="username">Username</label>
+            <input type="text" id="username" value={form.username} autoFocus
+              placeholder="Masukkan username" required
               onChange={(e) => setForm({ ...form, username: e.target.value })} />
           </div>
           <div className="field">
