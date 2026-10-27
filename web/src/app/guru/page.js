@@ -743,7 +743,7 @@ function Ujian() {
                     <td>{a.nama}</td>
                     <td>{a.kelas}</td>
                     <td>{a.status === 'selesai' ? <span className="badge" style={{ background: '#dcfce7', color: '#15803d' }}>Selesai</span> : <span className="badge" style={{ background: '#fef9c3', color: '#854d0e' }}>Berjalan</span>}</td>
-                    <td>{a.skor == null ? '—' : `${a.skor}%`}</td>
+                    <td>{a.skor == null ? '—' : a.skor}</td>
                     <td>{fmtTime(a.mulai_at)}</td>
                     <td>{fmtTime(a.selesai_at)}</td>
                     <td><button className="btn btn-ghost" style={{ padding: '4px 8px', fontSize: 11.5, color: '#dc2626' }} onClick={() => resetAtt(a)}>Reset</button></td>
