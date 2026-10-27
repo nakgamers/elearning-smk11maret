@@ -235,7 +235,22 @@ func (s *Server) createSubject(c fiber.Ctx) error {
 	var id int64
 	if err := s.pool.QueryRow(c.RequestCtx(),
 		`INSERT INTO subjects(nama,kode) VALUES($1,NULLIF($2,'')) RETURNING id`, b.Nama, b.Kode).Scan(&id); err != nil {
-		return err
+		// Jangan bocorkan error DB mentah ke klien (sebelumnya tampil
+		// "duplicate key ... subjects_kode_key" di layar admin). Log mentah
+		// tetap disimpan di sisi server untuk debugging.
+		s.log.Error("createSubject gagal", zap.Error(err))
+		if strings.Contains(err.Error(), "subjects_kode_key") {
+			// Kode sudah dipakai: sebutkan mapel yang sudah memakai kode itu
+			// supaya admin langsung tahu (biasanya mapel seed, mis. MTK).
+			var nama string
+			if qerr := s.pool.QueryRow(c.RequestCtx(),
+				`SELECT nama FROM subjects WHERE kode=$1`, b.Kode).Scan(&nama); qerr == nil {
+				return c.Status(fiber.StatusConflict).SendString(
+					"Kode " + b.Kode + " sudah dipakai oleh mapel '" + nama + "' — silakan pakai mapel yang sudah ada.")
+			}
+			return c.Status(fiber.StatusConflict).SendString("Kode tersebut sudah dipakai mapel lain.")
+		}
+		return c.Status(fiber.StatusInternalServerError).SendString("Gagal menambah mapel, silakan coba lagi.")
 	}
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"id": id})
 }
