@@ -170,7 +170,38 @@ function Guru() {
           ))}</tbody>
         </table>
       </div>
+
+      <GantiPasswordAdmin />
     </div>
+  )
+}
+
+function GantiPasswordAdmin() {
+  const [pw, setPw] = useState('')
+  const [pw2, setPw2] = useState('')
+  const [msg, setMsg] = useState('')
+
+  async function submit(e) {
+    e.preventDefault(); setMsg('')
+    if (pw.length < 6) { setMsg('❌ Password minimal 6 karakter.'); return }
+    if (pw !== pw2) { setMsg('❌ Konfirmasi password tidak cocok.'); return }
+    try {
+      await api.post('/users/admin/password', { password: pw })
+      setMsg('✅ Password Administrator diganti. Login berikutnya pakai password baru.')
+      setPw(''); setPw2('')
+    } catch (e) { setMsg('❌ ' + e.message) }
+  }
+
+  return (
+    <form className="card" style={{ padding: 18, display: 'grid', gap: 12 }} onSubmit={submit}>
+      <div style={{ fontWeight: 700 }}>Ganti password Administrator</div>
+      <div className="grid-2">
+        <div><label className="label">Password baru (min 6)</label><input className="input" required type="password" value={pw} onChange={(e) => setPw(e.target.value)} /></div>
+        <div><label className="label">Konfirmasi password baru</label><input className="input" required type="password" value={pw2} onChange={(e) => setPw2(e.target.value)} /></div>
+      </div>
+      {msg && <div style={{ fontSize: 14 }}>{msg}</div>}
+      <button className="btn btn-primary" style={{ justifySelf: 'start' }}>Ganti password</button>
+    </form>
   )
 }
 

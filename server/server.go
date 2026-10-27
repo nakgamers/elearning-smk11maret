@@ -64,6 +64,7 @@ func NewApp(cfg Config, pool *pgxpool.Pool, cache Cache, log *zap.Logger) *fiber
 	api.Put("/cps/:id", adminGuru, s.updateCP)
 	api.Get("/teachers", adminGuru, s.listTeachers)
 	api.Post("/teachers", adminOnly, s.createTeacher)
+	api.Post("/users/admin/password", adminOnly, s.setAdminPassword)
 	// Siswa: lihat = admin+guru; tambah/edit/import/hapus = admin saja.
 	api.Get("/students", adminGuru, s.listStudents)
 	api.Post("/students", adminOnly, s.createStudent)
@@ -265,6 +266,7 @@ func (s *Server) createSubject(c fiber.Ctx) error {
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"id": id})
 }
 
+
 func (s *Server) listCPs(c fiber.Ctx) error {
 	rows, err := s.pool.Query(c.RequestCtx(),
 		`SELECT cp.id,cp.mapel_id,cp.fase,cp.elemen,cp.deskripsi,s.nama
@@ -366,6 +368,32 @@ func (s *Server) createTeacher(c fiber.Ctx) error {
 		return fmt.Errorf("username mungkin sudah dipakai: %w", err)
 	}
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"id": id})
+}
+
+// Ganti password akun Administrator (admin only). Dipakai dari halaman
+// admin; password di-hash bcrypt seperti akun lainnya. Seed tidak akan
+// menimpa karena hanya jalan saat tabel users masih kosong.
+func (s *Server) setAdminPassword(c fiber.Ctx) error {
+	var b struct {
+		Password string `json:"password"`
+	}
+	if err := c.Bind().Body(&b); err != nil || len(b.Password) < 6 {
+		return c.Status(fiber.StatusBadRequest).SendString("Password minimal 6 karakter.")
+	}
+	h, err := HashPassword(b.Password)
+	if err != nil {
+		s.log.Error("hash password admin gagal", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).SendString("Gagal mengganti password, silakan coba lagi.")
+	}
+	tag, err := s.pool.Exec(c.RequestCtx(), `UPDATE users SET password_hash=$1 WHERE username='admin'`, h)
+	if err != nil {
+		s.log.Error("ganti password admin gagal", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).SendString("Gagal mengganti password, silakan coba lagi.")
+	}
+	if tag.RowsAffected() == 0 {
+		return c.Status(fiber.StatusNotFound).SendString("Akun Administrator tidak ditemukan.")
+	}
+	return c.JSON(fiber.Map{"ok": true})
 }
 
 // ---------- students ----------
