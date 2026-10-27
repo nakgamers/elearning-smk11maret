@@ -80,6 +80,8 @@ func NewApp(cfg Config, pool *pgxpool.Pool, cache Cache, log *zap.Logger) *fiber
 	api.Post("/materials", adminGuru, s.createMaterial)
 	api.Get("/assignments", adminGuru, s.listAssignments)
 	api.Post("/assignments", adminGuru, s.createAssignment)
+	api.Put("/assignments/:id", adminGuru, s.updateAssignment)
+	api.Delete("/assignments/:id", adminGuru, s.deleteAssignment)
 	api.Get("/assignments/:id/submissions", adminGuru, s.listSubmissions)
 	api.Post("/submissions/:id/grade", adminGuru, s.gradeSubmission)
 	api.Get("/grades/export", adminGuru, s.exportGrades)
@@ -726,9 +728,18 @@ func (s *Server) createMaterial(c fiber.Ctx) error {
 
 // ---------- assignments ----------
 
+// WIB tanpa DST → offset tetap +07:00; dipakai untuk menafsirkan input
+// datetime-local guru (waktu dinding WIB) menjadi instans yang benar.
+// Sebelumnya deadline di-parse sebagai UTC, jadi cutoff meleset 7 jam
+// (diketik 09:00 WIB tersimpan 09:00 UTC = 16:00 WIB).
+var wibZone = time.FixedZone("WIB", 7*3600)
+
 func (s *Server) listAssignments(c fiber.Ctx) error {
 	rows, err := s.pool.Query(c.RequestCtx(),
-		`SELECT a.id,a.judul,a.deskripsi,a.file_url,a.kelas,a.deadline,a.max_score,a.created_at,u.nama,s.nama,COALESCE(cp.elemen,''),COALESCE(cp.deskripsi,'')
+		`SELECT a.id,a.judul,a.deskripsi,a.file_url,a.kelas,a.deadline,a.max_score,a.created_at,u.nama,s.nama,COALESCE(cp.elemen,''),COALESCE(cp.deskripsi,''),
+		        a.mapel_id,a.cp_id,
+		        (SELECT COUNT(*) FROM submissions sub WHERE sub.assignment_id=a.id),
+		        (SELECT COUNT(*) FROM submissions sub WHERE sub.assignment_id=a.id AND sub.nilai IS NOT NULL)
 		 FROM assignments a JOIN users u ON u.id=a.guru_id JOIN subjects s ON s.id=a.mapel_id
 		 LEFT JOIN cps cp ON cp.id=a.cp_id ORDER BY a.created_at DESC`)
 	if err != nil {
@@ -742,10 +753,14 @@ func (s *Server) listAssignments(c fiber.Ctx) error {
 		var deadline *time.Time
 		var maxScore int
 		var createdAt time.Time
-		rows.Scan(&id, &judul, &desc, &furl, &kelas, &deadline, &maxScore, &createdAt, &guru, &mapel, &elemen, &cpdesc)
+		var mapelID int64
+		var cpID *int64
+		var jmlKumpul, jmlDinilai int
+		rows.Scan(&id, &judul, &desc, &furl, &kelas, &deadline, &maxScore, &createdAt, &guru, &mapel, &elemen, &cpdesc, &mapelID, &cpID, &jmlKumpul, &jmlDinilai)
 		out = append(out, fiber.Map{"id": id, "judul": judul, "deskripsi": desc, "file_url": furl,
 			"kelas": kelas, "deadline": deadline, "max_score": maxScore, "created_at": createdAt,
-			"guru": guru, "mapel": mapel, "cp_elemen": elemen, "cp_deskripsi": cpdesc})
+			"guru": guru, "mapel": mapel, "cp_elemen": elemen, "cp_deskripsi": cpdesc,
+			"mapel_id": mapelID, "cp_id": cpID, "jml_kumpul": jmlKumpul, "jml_dinilai": jmlDinilai})
 	}
 	return c.JSON(out)
 }
@@ -764,7 +779,7 @@ func (s *Server) createAssignment(c fiber.Ctx) error {
 	}
 	var dl *time.Time
 	if d := c.FormValue("deadline"); d != "" {
-		if t, err := time.Parse("2006-01-02T15:04", d); err == nil {
+		if t, err := time.ParseInLocation("2006-01-02T15:04", d, wibZone); err == nil {
 			dl = &t
 		}
 	}
@@ -781,6 +796,72 @@ func (s *Server) createAssignment(c fiber.Ctx) error {
 		return err
 	}
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"id": id})
+}
+
+// Edit tugas (admin/guru): form-data seperti create; file baru mengganti lampiran,
+// tanpa file baru lampiran lama dipertahankan; deadline kosong → NULL.
+func (s *Server) updateAssignment(c fiber.Ctx) error {
+	aid, _ := strconv.ParseInt(c.Params("id"), 10, 64)
+	mapelID, _ := strconv.ParseInt(c.FormValue("mapel_id"), 10, 64)
+	cpID, _ := strconv.ParseInt(c.FormValue("cp_id"), 10, 64)
+	judul := c.FormValue("judul")
+	if mapelID == 0 || judul == "" {
+		return fiber.ErrBadRequest
+	}
+	var furlLama string
+	if err := s.pool.QueryRow(c.RequestCtx(), `SELECT file_url FROM assignments WHERE id=$1`, aid).Scan(&furlLama); err != nil {
+		return c.Status(fiber.StatusNotFound).SendString("Tugas tidak ditemukan.")
+	}
+	furl, err := s.saveUpload(c, "file")
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	if furl == "" {
+		furl = furlLama
+	}
+	var dl *time.Time
+	if d := c.FormValue("deadline"); d != "" {
+		if t, err := time.ParseInLocation("2006-01-02T15:04", d, wibZone); err == nil {
+			dl = &t
+		}
+	}
+	maxScore, _ := strconv.Atoi(c.FormValue("max_score"))
+	if maxScore <= 0 {
+		maxScore = 100
+	}
+	tag, err := s.pool.Exec(c.RequestCtx(),
+		`UPDATE assignments SET mapel_id=$1,cp_id=NULLIF($2,0),judul=$3,deskripsi=$4,file_url=$5,
+		 kelas=$6,deadline=$7,max_score=$8 WHERE id=$9`,
+		mapelID, cpID, judul, c.FormValue("deskripsi"), furl, c.FormValue("kelas"), dl, maxScore, aid)
+	if err != nil {
+		s.log.Error("update assignment gagal", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).SendString("Gagal mengubah tugas, silakan coba lagi.")
+	}
+	if tag.RowsAffected() == 0 {
+		return c.Status(fiber.StatusNotFound).SendString("Tugas tidak ditemukan.")
+	}
+	return c.JSON(fiber.Map{"ok": true})
+}
+
+// Hapus tugas: DITOLAK bila sudah ada pengumpulan — submissions ikut terhapus
+// CASCADE, jadi menghapus tugas yang sudah dikumpulkan = menghapus kerja + nilai siswa.
+func (s *Server) deleteAssignment(c fiber.Ctx) error {
+	aid, _ := strconv.ParseInt(c.Params("id"), 10, 64)
+	ctx := c.RequestCtx()
+	var n int
+	s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM submissions WHERE assignment_id=$1`, aid).Scan(&n)
+	if n > 0 {
+		return c.Status(fiber.StatusBadRequest).SendString("Tugas sudah ada pengumpulan siswa, tidak bisa dihapus.")
+	}
+	tag, err := s.pool.Exec(ctx, `DELETE FROM assignments WHERE id=$1`, aid)
+	if err != nil {
+		s.log.Error("delete assignment gagal", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).SendString("Gagal menghapus tugas, silakan coba lagi.")
+	}
+	if tag.RowsAffected() == 0 {
+		return c.Status(fiber.StatusNotFound).SendString("Tugas tidak ditemukan.")
+	}
+	return c.JSON(fiber.Map{"ok": true})
 }
 
 func (s *Server) listSubmissions(c fiber.Ctx) error {

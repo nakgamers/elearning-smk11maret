@@ -163,6 +163,27 @@ function Tugas() {
   const [msg, setMsg] = useState('')
   const [openSub, setOpenSub] = useState(null)
   const [subs, setSubs] = useState([])
+  const [editId, setEditId] = useState(null)
+  const [tugasFile, setTugasFile] = useState(null)
+  const [fileKey, setFileKey] = useState(0)
+  const [editFileUrl, setEditFileUrl] = useState('')
+
+  // RFC3339 dari backend -> datetime-local (waktu lokal browser)
+  function toLocalInput(iso) {
+    if (!iso) return ''
+    const d = new Date(iso)
+    const p = (n) => String(n).padStart(2, '0')
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`
+  }
+
+  function fmtDeadline(d) {
+    if (!d) return 'Tanpa deadline'
+    return new Date(d).toLocaleString('id-ID', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+  }
+
+  function resetForm() {
+    setF({ mapel_id: '', cp_id: '', judul: '', deskripsi: '', kelas: '', deadline: '', max_score: '100' })
+  }
 
   async function submit(e) {
     e.preventDefault()
@@ -170,11 +191,44 @@ function Tugas() {
     try {
       const fd = new FormData()
       Object.entries(f).forEach(([k, v]) => fd.append(k, v))
-      await api.postForm('/assignments', fd)
-      setMsg('✅ Tugas dibuat.')
-      setF({ mapel_id: '', cp_id: '', judul: '', deskripsi: '', kelas: '', deadline: '', max_score: '100' })
+      if (tugasFile) fd.append('file', tugasFile)
+      if (editId) {
+        await api.putForm(`/assignments/${editId}`, fd)
+        setMsg('✅ Tugas diubah.')
+      } else {
+        await api.postForm('/assignments', fd)
+        setMsg('✅ Tugas dibuat.')
+      }
+      resetForm()
+      setEditId(null)
+      setTugasFile(null)
+      setEditFileUrl('')
+      setFileKey((k) => k + 1)
       reload()
     } catch (e) { setMsg('❌ ' + e.message) }
+  }
+
+  function startEdit(a) {
+    setF({ mapel_id: String(a.mapel_id ?? ''), cp_id: String(a.cp_id ?? ''), judul: a.judul, deskripsi: a.deskripsi || '', kelas: a.kelas || '', deadline: toLocalInput(a.deadline), max_score: String(a.max_score) })
+    setEditId(a.id)
+    setTugasFile(null)
+    setFileKey((k) => k + 1)
+    setEditFileUrl(a.file_url || '')
+    setMsg('')
+  }
+
+  function cancelEdit() {
+    setEditId(null)
+    resetForm()
+    setTugasFile(null)
+    setEditFileUrl('')
+    setFileKey((k) => k + 1)
+  }
+
+  async function removeTugas(a) {
+    if (!confirm(`Hapus tugas "${a.judul}"?`)) return
+    try { await api.del(`/assignments/${a.id}`); setMsg('✅ Tugas dihapus.'); reload() }
+    catch (e) { setMsg('❌ ' + e.message) }
   }
 
   async function viewSubs(id) {
@@ -190,7 +244,7 @@ function Tugas() {
   return (
     <div style={{ display: 'grid', gap: 14 }}>
       <form className="card" style={{ padding: 18, display: 'grid', gap: 12 }} onSubmit={submit}>
-        <div style={{ fontWeight: 700 }}>Buat Tugas</div>
+        <div style={{ fontWeight: 700 }}>{editId ? 'Edit Tugas' : 'Buat Tugas'}</div>
         <div className="grid-2">
           <div>
             <label className="label">Mapel</label>
@@ -215,6 +269,11 @@ function Tugas() {
           <label className="label">Deskripsi</label>
           <textarea className="input" rows={2} value={f.deskripsi} onChange={(e) => setF({ ...f, deskripsi: e.target.value })} />
         </div>
+        <div>
+          <label className="label">Lampiran (opsional)</label>
+          <input key={fileKey} className="input" type="file" onChange={(e) => setTugasFile(e.target.files[0] || null)} />
+          {editId && editFileUrl && <div style={{ fontSize: 12, marginTop: 4 }}>Lampiran saat ini: <a href={editFileUrl} target="_blank" rel="noreferrer">buka</a> (upload baru untuk mengganti)</div>}
+        </div>
         <div className="grid-3">
           <div>
             <label className="label">Rombel</label>
@@ -233,17 +292,27 @@ function Tugas() {
           </div>
         </div>
         {msg && <div style={{ fontSize: 14 }}>{msg}</div>}
-        <button className="btn btn-primary" style={{ justifySelf: 'start' }}>Buat Tugas</button>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button className="btn btn-primary" style={{ justifySelf: 'start' }}>{editId ? 'Simpan perubahan' : 'Buat Tugas'}</button>
+          {editId && <button type="button" className="btn btn-ghost" onClick={cancelEdit}>Batal edit</button>}
+        </div>
       </form>
 
       <div className="card" style={{ padding: 16 }}>
-        <div style={{ fontWeight: 700, marginBottom: 10 }}>Daftar Tugas</div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+          <div style={{ fontWeight: 700 }}>Daftar Tugas</div>
+          <button className="btn btn-ghost" style={{ padding: '4px 10px', fontSize: 12 }} onClick={() => api.download('/grades/export')}>⬇ Export nilai (xlsx)</button>
+        </div>
         {err && <div>{err}</div>}
         {data.map((a) => (
           <div key={a.id} style={{ borderBottom: '1px solid #f1f5f9', padding: '10px 0' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
-              <span style={{ fontWeight: 600 }}>{a.judul} <span style={{ color: '#64748b', fontWeight: 400, fontSize: 12 }}>({a.mapel} · {a.kelas || 'Semua'})</span></span>
-              <button className="btn btn-ghost" style={{ padding: '4px 10px', fontSize: 12 }} onClick={() => viewSubs(a.id)}>Lihat pengumpulan</button>
+              <span style={{ fontWeight: 600 }}>{a.judul} <span style={{ color: '#64748b', fontWeight: 400, fontSize: 12 }}>({a.mapel} · {a.kelas || 'Semua'} · Deadline: {fmtDeadline(a.deadline)} · Nilai maks: {a.max_score} · {a.jml_kumpul} pengumpulan · {a.jml_dinilai} dinilai)</span></span>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                <button className="btn btn-ghost" style={{ padding: '4px 10px', fontSize: 12 }} onClick={() => viewSubs(a.id)}>Lihat pengumpulan</button>
+                <button className="btn btn-ghost" style={{ padding: '4px 10px', fontSize: 12 }} onClick={() => startEdit(a)}>Edit</button>
+                <button className="btn btn-ghost" style={{ padding: '4px 10px', fontSize: 12, color: '#dc2626' }} onClick={() => removeTugas(a)}>Hapus</button>
+              </div>
             </div>
           </div>
         ))}

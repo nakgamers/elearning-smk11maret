@@ -58,6 +58,7 @@ export const api = {
   post: (p, body) => request(p, { method: 'POST', body }),
   put: (p, body) => request(p, { method: 'PUT', body }),
   postForm: (p, form) => request(p, { method: 'POST', form }),
+  putForm: (p, form) => request(p, { method: 'PUT', form }),
   del: (p) => request(p, { method: 'DELETE' }),
   login: (username, password) => request('/login', { method: 'POST', body: { username, password }, noAuth: true }),
   news: () => request('/news', { noAuth: true }),
