@@ -123,6 +123,7 @@ func NewApp(cfg Config, pool *pgxpool.Pool, cache Cache, log *zap.Logger) *fiber
 	api.Post("/exams/:id/start", siswa, s.startExam)
 	api.Post("/attempts/:id/answers", siswa, s.syncAnswers) // batch, idempotent
 	api.Post("/attempts/:id/finish", siswa, s.finishAttempt)
+	api.Post("/attempts/:id/pelanggaran", siswa, s.examPelanggaran) // anti-cheat CBT: keluar tab
 	api.Get("/my/attempts/:id/hasil", siswa, s.attemptResult)
 	api.Post("/cheat-signals", siswa, s.logCheatSignal) // dari perangkat Android siswa
 
@@ -184,14 +185,14 @@ func (s *Server) login(c fiber.Ctx) error {
 
 	// Siswa: username = NIS
 	var sid int64
-	var snama, skelas, shash string
+	var snama, skelas, snis, shash string
 	err := s.pool.QueryRow(ctx,
-		`SELECT id,nama,kelas,password_hash FROM students WHERE (nis=$1 OR username=$1) AND aktif`, body.Username).
-		Scan(&sid, &snama, &skelas, &shash)
+		`SELECT id,nama,kelas,nis,password_hash FROM students WHERE (nis=$1 OR username=$1) AND aktif`, body.Username).
+		Scan(&sid, &snama, &skelas, &snis, &shash)
 	if err == nil && CheckPassword(shash, body.Password) {
 		tok := SignToken(s.cfg.Secret, sid, "siswa", 0, 12*time.Hour)
 		return c.JSON(fiber.Map{"token": tok, "user": fiber.Map{
-			"id": sid, "nama": snama, "role": "siswa", "kelas": skelas}})
+			"id": sid, "nama": snama, "role": "siswa", "kelas": skelas, "nis": snis}})
 	}
 
 	// Guru/admin
@@ -1536,7 +1537,7 @@ func (s *Server) deleteQuestion(c fiber.Ctx) error {
 func (s *Server) listExamResults(c fiber.Ctx) error {
 	eid, _ := strconv.ParseInt(c.Params("id"), 10, 64)
 	rows, err := s.pool.Query(c.RequestCtx(),
-		`SELECT att.id,st.nis,st.nama,st.kelas,att.status,att.skor,att.mulai_at,att.selesai_at
+		`SELECT att.id,st.nis,st.nama,st.kelas,att.status,att.skor,att.mulai_at,att.selesai_at,att.pelanggaran_cheat
 		 FROM attempts att JOIN students st ON st.id=att.student_id
 		 WHERE att.exam_id=$1 ORDER BY st.kelas,st.nis`, eid)
 	if err != nil {
@@ -1551,9 +1552,11 @@ func (s *Server) listExamResults(c fiber.Ctx) error {
 		var skor *int
 		var mulai time.Time
 		var selesai *time.Time
-		rows.Scan(&id, &nis, &nama, &kelas, &status, &skor, &mulai, &selesai)
+		var pelanggaran int
+		rows.Scan(&id, &nis, &nama, &kelas, &status, &skor, &mulai, &selesai, &pelanggaran)
 		out = append(out, fiber.Map{"id": id, "nis": nis, "nama": nama, "kelas": kelas,
-			"status": status, "skor": skor, "mulai_at": mulai, "selesai_at": selesai})
+			"status": status, "skor": skor, "mulai_at": mulai, "selesai_at": selesai,
+			"pelanggaran": pelanggaran})
 	}
 	return c.JSON(out)
 }
@@ -1838,7 +1841,8 @@ func (s *Server) startExam(c fiber.Ctx) error {
 	}
 	// Ujian yang sudah selesai tidak boleh dikerjakan ulang.
 	var status string
-	s.pool.QueryRow(ctx, `SELECT status FROM attempts WHERE id=$1`, attID).Scan(&status)
+	var pelanggaran int
+	s.pool.QueryRow(ctx, `SELECT status,pelanggaran_cheat FROM attempts WHERE id=$1`, attID).Scan(&status, &pelanggaran)
 	if status == "selesai" {
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{
 			"error": "Ujian ini sudah dikerjakan dan dinilai.", "attempt_id": attID})
@@ -1884,7 +1888,8 @@ func (s *Server) startExam(c fiber.Ctx) error {
 		r := rand.New(rand.NewSource(attID))
 		r.Shuffle(len(out), func(i, j int) { out[i], out[j] = out[j], out[i] })
 	}
-	return c.JSON(fiber.Map{"attempt_id": attID, "durasi_menit": dur, "mulai_at": mulaiAt, "questions": out})
+	return c.JSON(fiber.Map{"attempt_id": attID, "durasi_menit": dur, "mulai_at": mulaiAt,
+		"pelanggaran": pelanggaran, "questions": out})
 }
 
 // Sync jawaban berkala (master plan §2.2 Opsi A): payload batch kecil,
@@ -1982,6 +1987,81 @@ func (s *Server) finishAttempt(c fiber.Ctx) error {
 		s.log.Info("attempt selesai", zap.Int64("attempt", aid), zap.Int("skor", persen))
 	}()
 	return c.JSON(fiber.Map{"ok": true, "skor": persen})
+}
+
+// Anti-cheat ujian — port persis kebijakan CBT (Exam::pelanggaran +
+// AttemptModel::catatPelanggaran di CBT-SMK11MARET-LOKAL):
+// siswa meninggalkan tab/halaman ujian → pelanggaran +1 (maks 3),
+// SELURUH jawaban attempt dihapus, dan pada pelanggaran ke-3 attempt
+// langsung difinalisasi (skor dari jawaban yang tersisa = kosong).
+// Penghitungan di server dalam transaksi dgn kunci baris attempt
+// (FOR UPDATE) agar dua event bersamaan tidak kehilangan hitungan.
+// Setiap pelanggaran juga dicatat ke cheat_signals sebagai riwayat
+// utk guru (jenis 'keluar_tab'). Gangguan koneksi BUKAN pelanggaran
+// dan tidak pernah masuk sini.
+func (s *Server) examPelanggaran(c fiber.Ctx) error {
+	cl := claimsOf(c)
+	aid, _ := strconv.ParseInt(c.Params("id"), 10, 64)
+	ctx := c.RequestCtx()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var examID int64
+	var status string
+	var pelanggaran int
+	err = tx.QueryRow(ctx,
+		`SELECT exam_id,status,pelanggaran_cheat FROM attempts
+		 WHERE id=$1 AND student_id=$2 FOR UPDATE`, aid, cl.UID).
+		Scan(&examID, &status, &pelanggaran)
+	if err != nil {
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+			"ok": false, "selesai": true, "error": "Ujian sudah ditutup."})
+	}
+	if status != "berjalan" {
+		_ = tx.Commit(ctx)
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+			"ok": false, "selesai": true, "error": "Ujian sudah ditutup."})
+	}
+	if pelanggaran < 3 {
+		pelanggaran++
+	}
+	// Reset jawaban: kebijakan CBT — jawaban yang sudah terisi dihapus
+	// setiap kali pelanggaran tercatat.
+	if _, err := tx.Exec(ctx, `DELETE FROM answers WHERE attempt_id=$1`, aid); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE attempts SET pelanggaran_cheat=$1,pelanggaran_terakhir_at=now() WHERE id=$2`,
+		pelanggaran, aid); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO cheat_signals(student_id,exam_id,jenis) VALUES($1,$2,'keluar_tab')`,
+		cl.UID, examID); err != nil {
+		return err
+	}
+	dihentikan := pelanggaran >= 3
+	if dihentikan {
+		// Jawaban sudah kosong → skor 0, sama seperti finalisasi CBT
+		// atas attempt yang jawabannya telah direset.
+		if _, err := tx.Exec(ctx,
+			`UPDATE attempts SET status='selesai',skor=0,selesai_at=now() WHERE id=$1`, aid); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	go func() {
+		s.log.Info("pelanggaran anti-cheat ujian",
+			zap.Int64("attempt", aid), zap.Int64("exam", examID),
+			zap.Int64("student", cl.UID), zap.Int("pelanggaran", pelanggaran),
+			zap.Bool("dihentikan", dihentikan))
+	}()
+	return c.JSON(fiber.Map{"ok": true, "pelanggaran": pelanggaran,
+		"maksimal": 3, "dihentikan": dihentikan})
 }
 
 // Hasil ujian untuk halaman hasil siswa (benar/salah/kosong seperti CBT).

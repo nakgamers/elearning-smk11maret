@@ -148,6 +148,8 @@ CREATE TABLE IF NOT EXISTS attempts (
   selesai_at TIMESTAMPTZ,
   skor INT,
   status TEXT NOT NULL DEFAULT 'berjalan' CHECK (status IN ('berjalan','selesai')),
+  pelanggaran_cheat INT NOT NULL DEFAULT 0,
+  pelanggaran_terakhir_at TIMESTAMPTZ,
   UNIQUE(exam_id, student_id)
 );
 
@@ -200,6 +202,11 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, log *zap.Logger) error {
 		// apa adanya, username jadi pengenal login tambahan. UNIQUE; NULL untuk
 		// baris lama (NULL tidak dihitung duplikat oleh UNIQUE).
 		`ALTER TABLE students ADD COLUMN IF NOT EXISTS username TEXT UNIQUE`,
+		// Anti-cheat ujian (port CBT): counter pelanggaran per attempt +
+		// stempel pelanggaran terakhir. Murni penambahan kolom dgn default —
+		// baris lama utuh (0 / NULL), tidak ada data yang diubah/dihapus.
+		`ALTER TABLE attempts ADD COLUMN IF NOT EXISTS pelanggaran_cheat INT NOT NULL DEFAULT 0`,
+		`ALTER TABLE attempts ADD COLUMN IF NOT EXISTS pelanggaran_terakhir_at TIMESTAMPTZ`,
 	}
 	for _, m := range migrations {
 		if _, err := pool.Exec(ctx, m); err != nil {

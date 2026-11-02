@@ -9,6 +9,20 @@ import { api, getUser } from '../../lib/api'
 
 const OPSI_LABEL = ['A', 'B', 'C', 'D', 'E']
 
+// Fullscreen (port CBT kerjakan.php): requestFullscreen + fallback prefix,
+// gagal diam-diam di perangkat/browser yang tidak mendukung.
+function masukFullscreen() {
+  try {
+    const el = document.documentElement
+    const req = el.requestFullscreen || el.webkitRequestFullscreen || el.mozRequestFullScreen || el.msRequestFullscreen
+    if (req) { const p = req.call(el); if (p && p.catch) p.catch(() => {}) }
+  } catch {}
+}
+function fullscreenAktif() {
+  return Boolean(document.fullscreenElement || document.webkitFullscreenElement ||
+    document.mozFullScreenElement || document.msFullscreenElement)
+}
+
 export default function UjianPage() {
   const { id } = useParams()
   const router = useRouter()
@@ -27,6 +41,9 @@ export default function UjianPage() {
 
   async function mulai() {
     setErr('')
+    // Dipanggil sinkron dari klik tombol (gestur pengguna) agar
+    // requestFullscreen tidak diblokir browser — seperti CBT.
+    masukFullscreen()
     try {
       const e = await api.post(`/exams/${id}/start`, {})
       setExam(e)
@@ -59,7 +76,10 @@ export default function UjianPage() {
             </tbody>
           </table>
           <div className="alert" style={{ marginBottom: '1rem' }}>
-            ⚠️ Jangan keluar dari halaman ini selama ujian berlangsung. Jawaban yang sudah dipilih akan tersimpan otomatis.
+            ⚠️ Ujian berjalan dalam mode fullscreen. <b>Dilarang keluar dari tab/halaman ujian</b> —
+            setiap pelanggaran dicatat sebagai kecurangan: <b>semua jawaban direset</b>, dan pada
+            pelanggaran ke-3 ujian <b>langsung dihentikan</b>. Jawaban tersimpan otomatis selama
+            kamu tetap di halaman ini.
           </div>
           {err && <div className="alert alert-error">{err}</div>}
           <button className="btn btn-block" onClick={mulai} disabled={!info}>Mulai Ujian →</button>
@@ -70,20 +90,30 @@ export default function UjianPage() {
   }
 
   // ---------- layar kerja ----------
-  return <Kerjakan exam={exam} user={user} onError={(m) => setErr(m)} onDone={(att, skor) => router.replace(`/hasil/${att}?skor=${skor}`)} />
+  return <Kerjakan exam={exam} user={user} onError={(m) => setErr(m)} onDone={(att, skor) => router.replace(`/hasil/${att}?skor=${skor}`)} onStopped={(att) => router.replace(`/hasil/${att}`)} />
 }
 
-function Kerjakan({ exam, user, onDone }) {
+function Kerjakan({ exam, user, onDone, onStopped }) {
   const [cur, setCur] = useState(0)
   const [answers, setAnswers] = useState({})   // qid -> index opsi
   const [ragu, setRagu] = useState({})         // qid -> bool (lokal saja)
   const [saveState, setSaveState] = useState({ txt: 'Tersimpan otomatis', cls: '' })
   const [timeLeft, setTimeLeft] = useState(null)
   const [finishing, setFinishing] = useState(false)
+  // --- anti-cheat (port CBT) ---
+  const [pelanggaran, setPelanggaran] = useState(exam.pelanggaran || 0)
+  const [cheatMsg, setCheatMsg] = useState('')
+  const [dihentikan, setDihentikan] = useState(false)
+  const [fsRemind, setFsRemind] = useState(false)
   const answersRef = useRef({})
   answersRef.current = answers
   const examRef = useRef(exam)
   examRef.current = exam
+  const finishingRef = useRef(false)
+  const stoppedRef = useRef(false)
+  const sendingRef = useRef(false)
+  const unloadRef = useRef(false)
+  const fsPernahRef = useRef(false)
 
   // restore jawaban lokal + jawaban dari server (mine)
   useEffect(() => {
@@ -185,6 +215,92 @@ function Kerjakan({ exam, user, onDone }) {
     return () => window.removeEventListener('beforeunload', bu)
   }, [])
 
+  // ---------- anti-cheat (port CBT kerjakan.php) ----------
+  // Reset jawaban lokal: state + salinan localStorage attempt ini.
+  const resetLokal = useCallback(() => {
+    setAnswers({})
+    setRagu({})
+    try {
+      const local = JSON.parse(localStorage.getItem('exam-answers') || '{}')
+      delete local[examRef.current.attempt_id]
+      localStorage.setItem('exam-answers', JSON.stringify(local))
+    } catch {}
+  }, [])
+
+  const laporPelanggaran = useCallback(async () => {
+    if (sendingRef.current || finishingRef.current || stoppedRef.current) return
+    sendingRef.current = true
+    resetLokal()
+    setCheatMsg('Terdeteksi keluar dari tab — jawaban direset')
+    setSaveState({ txt: 'jawaban direset', cls: 'bad' })
+    try {
+      const r = await api.post(`/attempts/${examRef.current.attempt_id}/pelanggaran`, {})
+      if (r.pelanggaran != null) setPelanggaran(r.pelanggaran)
+      if (r.dihentikan) {
+        stoppedRef.current = true
+        setDihentikan(true)
+      } else if (r.pelanggaran) {
+        setCheatMsg(`Terdeteksi curang ${r.pelanggaran}/3 — semua jawaban direset`)
+      }
+    } catch {
+      // Jangan menyatakan reset tercatat bila request ke server gagal.
+      setCheatMsg('Pelanggaran belum tercatat — periksa koneksi')
+    } finally {
+      sendingRef.current = false
+    }
+  }, [resetLokal])
+
+  // Tab berpindah/ditutup: visibilitychange lebih terukur daripada blur,
+  // yang bisa terpicu dialog browser/keyboard virtual (komentar CBT).
+  // Jeda 1 detik: kedipan sesaat (notifikasi lewat, dsb) tidak dihitung.
+  useEffect(() => {
+    let timer = null
+    function onVis() {
+      if (document.visibilityState === 'hidden') {
+        clearTimeout(timer)
+        timer = setTimeout(() => {
+          timer = null
+          if (!unloadRef.current && document.visibilityState === 'hidden') laporPelanggaran()
+        }, 1000)
+      } else {
+        clearTimeout(timer)
+        timer = null
+        unloadRef.current = false
+      }
+    }
+    function onHide() { unloadRef.current = true }
+    document.addEventListener('visibilitychange', onVis)
+    window.addEventListener('pagehide', onHide)
+    return () => {
+      document.removeEventListener('visibilitychange', onVis)
+      window.removeEventListener('pagehide', onHide)
+      clearTimeout(timer)
+    }
+  }, [laporPelanggaran])
+
+  // Keluar fullscreen → banner pengingat ramah saja, BUKAN pelanggaran (CBT).
+  useEffect(() => {
+    if (fullscreenAktif()) fsPernahRef.current = true
+    function onFs() {
+      if (fullscreenAktif()) {
+        fsPernahRef.current = true
+        setFsRemind(false)
+      } else if (fsPernahRef.current && !stoppedRef.current && !finishingRef.current) {
+        setFsRemind(true)
+      }
+    }
+    document.addEventListener('fullscreenchange', onFs)
+    document.addEventListener('webkitfullscreenchange', onFs)
+    document.addEventListener('mozfullscreenchange', onFs)
+    document.addEventListener('MSFullscreenChange', onFs)
+    return () => {
+      document.removeEventListener('fullscreenchange', onFs)
+      document.removeEventListener('webkitfullscreenchange', onFs)
+      document.removeEventListener('mozfullscreenchange', onFs)
+      document.removeEventListener('MSFullscreenChange', onFs)
+    }
+  }, [])
+
   async function kumpul(auto = false) {
     if (finishing) return
     const total = exam.questions.length
@@ -196,6 +312,7 @@ function Kerjakan({ exam, user, onDone }) {
       if (!window.confirm(msg)) return
     }
     setFinishing(true)
+    finishingRef.current = true // submit disengaja: bukan pelanggaran (CBT)
     const list = Object.entries(answersRef.current).map(([qid, jawaban]) => ({ question_id: +qid, jawaban }))
     if (list.length) await kirimBatch(list)
     try {
@@ -205,6 +322,7 @@ function Kerjakan({ exam, user, onDone }) {
     } catch (e) {
       setSaveState({ txt: e.message, cls: 'bad' })
       setFinishing(false)
+      finishingRef.current = false
     }
   }
 
@@ -224,17 +342,48 @@ function Kerjakan({ exam, user, onDone }) {
 
   return (
     <div style={{ background: 'var(--bg)', minHeight: '100vh' }}>
+      {/* Watermark identitas siswa (seperti CBT: nama - NIS) */}
+      <div aria-hidden="true" style={{
+        position: 'fixed', inset: 0, display: 'grid', placeItems: 'center',
+        pointerEvents: 'none', zIndex: 1, overflow: 'hidden',
+      }}>
+        <span style={{
+          transform: 'rotate(-24deg)', fontSize: '2rem', fontWeight: 800,
+          color: 'rgba(100,116,139,0.08)', whiteSpace: 'nowrap', userSelect: 'none',
+        }}>{user?.nama || ''}{user?.nis ? ` - ${user.nis}` : ''}</span>
+      </div>
       <div className="exam-bar no-print">
         <div className="nm">
           <b>{exam.nama}</b>
           <small>{user?.nama || ''}{user?.kelas ? ` · ${user.kelas}` : ''}</small>
         </div>
+        {pelanggaran > 0 && (
+          <span className="save-pill bad" title="Pelanggaran anti-cheat tercatat">
+            ⚠️ Curang {pelanggaran}/3
+          </span>
+        )}
         <span className={'save-pill' + (saveState.cls ? ' ' + saveState.cls : '')}>{saveState.txt}</span>
         <div id="timer" className={timeLeft <= 60 ? 'crit' : timeLeft <= 300 ? 'warn' : ''}>
           {(h > 0 ? p(h) + ':' : '') + p(m) + ':' + p(s)}
         </div>
         <button className="btn btn-ghost btn-sm" type="button" onClick={() => kumpul()} disabled={finishing}>Kumpulkan</button>
       </div>
+
+      {fsRemind && (
+        <div role="status" style={{
+          background: '#fef9c3', color: '#854d0e', padding: '8px 14px',
+          display: 'flex', gap: 10, alignItems: 'center', justifyContent: 'center', fontSize: 13.5,
+        }}>
+          <span>Mode fullscreen keluar — klik untuk kembali</span>
+          <button className="btn btn-sm" type="button" onClick={() => { masukFullscreen(); setFsRemind(false) }}>Kembali fullscreen</button>
+        </div>
+      )}
+      {cheatMsg && !dihentikan && (
+        <div role="status" style={{
+          background: '#fee2e2', color: '#b91c1c', padding: '8px 14px',
+          textAlign: 'center', fontSize: 13.5, fontWeight: 600,
+        }}>{cheatMsg}</div>
+      )}
 
       <div className="exam-layout">
         <div>
@@ -307,6 +456,23 @@ function Kerjakan({ exam, user, onDone }) {
           </div>
         </div>
       </div>
+
+      {dihentikan && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.65)', zIndex: 50,
+          display: 'grid', placeItems: 'center', padding: 16,
+        }}>
+          <div className="card" style={{ maxWidth: 420, width: '100%', padding: '1.6rem', textAlign: 'center' }}>
+            <div style={{ fontSize: '2rem', marginBottom: '.4rem' }}>⛔</div>
+            <h2 style={{ margin: '0 0 .5rem', fontSize: '1.25rem' }}>Ujian dihentikan</h2>
+            <p className="muted" style={{ margin: '0 0 1.2rem' }}>
+              Terdeteksi curang 3 kali. Ujian dinyatakan selesai — sesuai aturan,
+              jawaban yang telah direset tidak dinilai.
+            </p>
+            <button className="btn btn-block" type="button" onClick={() => onStopped(exam.attempt_id)}>Lihat Hasil</button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

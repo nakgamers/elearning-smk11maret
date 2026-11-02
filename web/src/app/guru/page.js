@@ -739,7 +739,7 @@ function Ujian() {
             {results.length === 0 && <div style={{ fontSize: 13 }}>Belum ada siswa yang mengerjakan.</div>}
             {results.length > 0 && (
               <table className="tbl">
-                <thead><tr><th>NIS</th><th>Nama</th><th>Kelas</th><th>Status</th><th>Skor</th><th>Mulai</th><th>Selesai</th><th>Aksi</th></tr></thead>
+                <thead><tr><th>NIS</th><th>Nama</th><th>Kelas</th><th>Status</th><th>Skor</th><th>Pelanggaran</th><th>Mulai</th><th>Selesai</th><th>Aksi</th></tr></thead>
                 <tbody>{results.map((a) => (
                   <tr key={a.id}>
                     <td>{a.nis}</td>
@@ -747,6 +747,11 @@ function Ujian() {
                     <td>{a.kelas}</td>
                     <td>{a.status === 'selesai' ? <span className="badge" style={{ background: '#dcfce7', color: '#15803d' }}>Selesai</span> : <span className="badge" style={{ background: '#fef9c3', color: '#854d0e' }}>Berjalan</span>}</td>
                     <td>{a.skor == null ? '—' : a.skor}</td>
+                    <td>{(a.pelanggaran || 0) >= 3
+                      ? <span className="badge" style={{ background: '#fee2e2', color: '#b91c1c' }}>3/3 — dihentikan</span>
+                      : (a.pelanggaran || 0) > 0
+                        ? <span className="badge" style={{ background: '#fef9c3', color: '#854d0e' }}>{a.pelanggaran}/3</span>
+                        : <span style={{ color: 'var(--muted)' }}>—</span>}</td>
                     <td>{fmtTime(a.mulai_at)}</td>
                     <td>{fmtTime(a.selesai_at)}</td>
                     <td><button className="btn btn-ghost" style={{ padding: '4px 8px', fontSize: 11.5, color: '#dc2626' }} onClick={() => resetAtt(a)}>Reset</button></td>
