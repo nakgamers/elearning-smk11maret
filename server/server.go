@@ -413,8 +413,8 @@ func (s *Server) listStudents(c fiber.Ctx) error {
 		conds = append(conds, "aktif")
 	}
 	if k := c.Query("kelas"); k != "" {
-		args = append(args, k)
-		conds = append(conds, fmt.Sprintf("kelas=$%d", len(args)))
+		args = append(args, normalizeKelas(k))
+		conds = append(conds, fmt.Sprintf("%s=$%d", normKelasSQL("kelas"), len(args)))
 	}
 	if len(conds) > 0 {
 		q += " WHERE " + strings.Join(conds, " AND ")
@@ -448,6 +448,7 @@ func (s *Server) createStudent(c fiber.Ctx) error {
 	if err := c.Bind().Body(&b); err != nil || b.NIS == "" || b.Nama == "" || b.Kelas == "" {
 		return fiber.ErrBadRequest
 	}
+	b.Kelas = rapikanKelas(b.Kelas)
 	pw := def(b.Password, "siswa123")
 	h, err := HashPassword(pw)
 	if err != nil {
@@ -480,6 +481,7 @@ func (s *Server) updateStudent(c fiber.Ctx) error {
 		return fiber.ErrBadRequest
 	}
 	ctx := c.RequestCtx()
+	b.Kelas = rapikanKelas(b.Kelas)
 	if b.Nama != "" || b.NIS != "" || b.Kelas != "" || b.JK != "" {
 		if _, err := s.pool.Exec(ctx,
 			`UPDATE students SET nis=COALESCE(NULLIF($1,''),nis), nama=COALESCE(NULLIF($2,''),nama),
@@ -538,7 +540,7 @@ func (s *Server) importStudents(c fiber.Ctx) error {
 			 ON CONFLICT(nis) DO UPDATE SET nama=EXCLUDED.nama,kelas=EXCLUDED.kelas,jk=EXCLUDED.jk,aktif=TRUE,
 			 username=COALESCE(EXCLUDED.username, students.username),
 			 password_hash=CASE WHEN $7 THEN EXCLUDED.password_hash ELSE students.password_hash END`,
-			r[0], r[1], r[2], defJk(col(r, 3)), pw, col(r, 5), pwGiven); err != nil {
+			r[0], r[1], rapikanKelas(r[2]), defJk(col(r, 3)), pw, col(r, 5), pwGiven); err != nil {
 			skipped++
 			continue
 		}
@@ -570,7 +572,7 @@ func (s *Server) deleteStudent(c fiber.Ctx) error {
 func (s *Server) listRombel(c fiber.Ctx) error {
 	rows, err := s.pool.Query(c.RequestCtx(),
 		`SELECT r.id,r.nama,COALESCE(u.nama,''),COALESCE(u.id,0),
-		        (SELECT count(*) FROM students st WHERE st.kelas=r.nama AND st.aktif)
+		        (SELECT count(*) FROM students st WHERE `+normKelasSQL("st.kelas")+`=`+normKelasSQL("r.nama")+` AND st.aktif)
 		 FROM rombel r LEFT JOIN users u ON u.id=r.walas_id
 		 ORDER BY r.nama`)
 	if err != nil {
@@ -596,6 +598,7 @@ func (s *Server) createRombel(c fiber.Ctx) error {
 	if err := c.Bind().Body(&b); err != nil || b.Nama == "" {
 		return fiber.ErrBadRequest
 	}
+	b.Nama = rapikanKelas(b.Nama)
 	var id int64
 	err := s.pool.QueryRow(c.RequestCtx(),
 		`INSERT INTO rombel(nama,walas_id) VALUES($1,NULLIF($2,0)) ON CONFLICT(nama) DO NOTHING RETURNING id`,
@@ -625,11 +628,20 @@ func (s *Server) updateRombel(c fiber.Ctx) error {
 		if err := s.pool.QueryRow(ctx, `SELECT nama FROM rombel WHERE id=$1`, id).Scan(&old); err != nil {
 			return fiber.ErrNotFound
 		}
-		if _, err := s.pool.Exec(ctx, `UPDATE rombel SET nama=$1 WHERE id=$2`, b.Nama, id); err != nil {
+		if _, err := s.pool.Exec(ctx, `UPDATE rombel SET nama=$1 WHERE id=$2`, rapikanKelas(b.Nama), id); err != nil {
 			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "Nama rombel sudah ada"})
 		}
-		// sinkronkan kelas siswa yang mengikuti rombel ini
-		_, _ = s.pool.Exec(ctx, `UPDATE students SET kelas=$1 WHERE kelas=$2`, b.Nama, old)
+		// Sinkronkan semua pemegang nama rombel lama: siswa DAN tugas/materi/
+		// ujian yang sudah terlanjur dibuat. Dulu hanya siswa yang disinkronkan,
+		// jadi tugas per-rombel lama tetap memegang nama lama dan hilang dari
+		// siswa setelah rombel diganti nama. Pencocokan toleran (normalizeKelas)
+		// agar varian spasi/kapital ikut terjangkau.
+		baru := rapikanKelas(b.Nama)
+		normLama := normalizeKelas(old)
+		_, _ = s.pool.Exec(ctx, `UPDATE students SET kelas=$1 WHERE `+normKelasSQL("kelas")+`=$2`, baru, normLama)
+		_, _ = s.pool.Exec(ctx, `UPDATE assignments SET kelas=$1 WHERE `+normKelasSQL("kelas")+`=$2`, baru, normLama)
+		_, _ = s.pool.Exec(ctx, `UPDATE materials SET kelas=$1 WHERE `+normKelasSQL("kelas")+`=$2`, baru, normLama)
+		_, _ = s.pool.Exec(ctx, `UPDATE exams SET kelas=$1 WHERE `+normKelasSQL("kelas")+`=$2`, baru, normLama)
 	}
 	if b.WalasID != nil {
 		if _, err := s.pool.Exec(ctx,
@@ -677,8 +689,8 @@ func (s *Server) walasAttendance(c fiber.Ctx) error {
 		 FROM students st
 		 LEFT JOIN attendance a ON a.student_id=st.id AND a.tanggal=$2::date
 		 LEFT JOIN subjects sb ON sb.id=a.mapel_id
-		 WHERE st.kelas=$1 AND st.aktif
-		 ORDER BY st.nis`, namaRombel, tanggal)
+		 WHERE `+normKelasSQL("st.kelas")+`=$1 AND st.aktif
+		 ORDER BY st.nis`, normalizeKelas(namaRombel), tanggal)
 	if err != nil {
 		return err
 	}
@@ -755,7 +767,7 @@ func (s *Server) createMaterial(c fiber.Ctx) error {
 	var id int64
 	err = s.pool.QueryRow(c.RequestCtx(),
 		`INSERT INTO materials(mapel_id,cp_id,guru_id,judul,isi,file_url,kelas) VALUES($1,NULLIF($2,0),$3,$4,$5,$6,$7) RETURNING id`,
-		mapelID, cpID, cl.UID, judul, c.FormValue("isi"), furl, c.FormValue("kelas")).Scan(&id)
+		mapelID, cpID, cl.UID, judul, c.FormValue("isi"), furl, rapikanKelas(c.FormValue("kelas"))).Scan(&id)
 	if err != nil {
 		return err
 	}
@@ -769,6 +781,27 @@ func (s *Server) createMaterial(c fiber.Ctx) error {
 // Sebelumnya deadline di-parse sebagai UTC, jadi cutoff meleset 7 jam
 // (diketik 09:00 WIB tersimpan 09:00 UTC = 16:00 WIB).
 var wibZone = time.FixedZone("WIB", 7*3600)
+
+// rapikanKelas membersihkan penulisan nama rombel/kelas saat disimpan:
+// spasi di awal/akhir dibuang dan spasi ganda dirapatkan (kapital dipertahankan).
+func rapikanKelas(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
+// normalizeKelas = rapikanKelas + huruf kecil, untuk PERBANDINGAN toleran.
+// Nama rombel di tugas/materi/ujian datang dari tabel rombel, sedangkan kelas
+// siswa datang dari impor/input — dua sumber teks yang bisa berbeda spasi atau
+// kapital, sehingga kecocokan persis pernah membuat tugas per-rombel tidak
+// muncul di siswa (bug lama "tugas harus semua kelas baru muncul").
+func normalizeKelas(s string) string {
+	return strings.ToLower(rapikanKelas(s))
+}
+
+// normKelasSQL membungkus kolom teks di SQL agar perbandingannya setara
+// dengan normalizeKelas di sisi Go.
+func normKelasSQL(col string) string {
+	return "LOWER(REGEXP_REPLACE(TRIM(" + col + "),'\\s+',' ','g'))"
+}
 
 func (s *Server) listAssignments(c fiber.Ctx) error {
 	rows, err := s.pool.Query(c.RequestCtx(),
@@ -827,7 +860,7 @@ func (s *Server) createAssignment(c fiber.Ctx) error {
 	err = s.pool.QueryRow(c.RequestCtx(),
 		`INSERT INTO assignments(mapel_id,cp_id,guru_id,judul,deskripsi,file_url,kelas,deadline,max_score)
 		 VALUES($1,NULLIF($2,0),$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
-		mapelID, cpID, cl.UID, judul, c.FormValue("deskripsi"), furl, c.FormValue("kelas"), dl, maxScore).Scan(&id)
+		mapelID, cpID, cl.UID, judul, c.FormValue("deskripsi"), furl, rapikanKelas(c.FormValue("kelas")), dl, maxScore).Scan(&id)
 	if err != nil {
 		return err
 	}
@@ -868,7 +901,7 @@ func (s *Server) updateAssignment(c fiber.Ctx) error {
 	tag, err := s.pool.Exec(c.RequestCtx(),
 		`UPDATE assignments SET mapel_id=$1,cp_id=NULLIF($2,0),judul=$3,deskripsi=$4,file_url=$5,
 		 kelas=$6,deadline=$7,max_score=$8 WHERE id=$9`,
-		mapelID, cpID, judul, c.FormValue("deskripsi"), furl, c.FormValue("kelas"), dl, maxScore, aid)
+		mapelID, cpID, judul, c.FormValue("deskripsi"), furl, rapikanKelas(c.FormValue("kelas")), dl, maxScore, aid)
 	if err != nil {
 		s.log.Error("update assignment gagal", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).SendString("Gagal mengubah tugas, silakan coba lagi.")
@@ -949,8 +982,8 @@ func (s *Server) exportGrades(c fiber.Ctx) error {
 	      WHERE sub.nilai IS NOT NULL`
 	args := []any{}
 	if kelas != "" {
-		args = append(args, kelas)
-		q += fmt.Sprintf(" AND st.kelas=$%d", len(args))
+		args = append(args, normalizeKelas(kelas))
+		q += fmt.Sprintf(" AND %s=$%d", normKelasSQL("st.kelas"), len(args))
 	}
 	q += " ORDER BY st.kelas,st.nis,s.nama"
 	rows, err := s.pool.Query(c.RequestCtx(), q, args...)
@@ -984,8 +1017,8 @@ func (s *Server) listAttendance(c fiber.Ctx) error {
 	      LEFT JOIN subjects sb ON sb.id=a.mapel_id WHERE TRUE`
 	args := []any{}
 	if k := c.Query("kelas"); k != "" {
-		args = append(args, k)
-		q += fmt.Sprintf(" AND st.kelas=$%d", len(args))
+		args = append(args, normalizeKelas(k))
+		q += fmt.Sprintf(" AND %s=$%d", normKelasSQL("st.kelas"), len(args))
 	}
 	if t := c.Query("tanggal"); t != "" {
 		args = append(args, t)
@@ -1060,9 +1093,9 @@ func (s *Server) exportAttendancePDF(c fiber.Ctx) error {
 		      ORDER BY CASE WHEN $2<>0 AND a1.mapel_id=$2 THEN 0 ELSE 1 END, a1.id DESC
 		      LIMIT 1
 	      ) a ON TRUE
-	      WHERE st.aktif AND ($3='' OR st.kelas=$3)
+	      WHERE st.aktif AND ($3='' OR `+normKelasSQL("st.kelas")+`=$3)
 	      ORDER BY st.nis`
-	rows, err := s.pool.Query(ctx, q, tanggal, mapelID, kelas)
+	rows, err := s.pool.Query(ctx, q, tanggal, mapelID, normalizeKelas(kelas))
 	if err != nil {
 		return err
 	}
@@ -1327,7 +1360,7 @@ func (s *Server) createExam(c fiber.Ctx) error {
 	err := s.pool.QueryRow(c.RequestCtx(),
 		`INSERT INTO exams(nama,mapel_id,cp_id,guru_id,kelas,durasi_menit,mulai_at,selesai_at,acak_soal)
 		 VALUES($1,$2,NULLIF($3,0),$4,$5,$6,$7,$8,$9) RETURNING id`,
-		b.Nama, b.MapelID, b.CpID, cl.UID, b.Kelas, b.Durasi, mulai, selesai, b.Acak).Scan(&id)
+		b.Nama, b.MapelID, b.CpID, cl.UID, rapikanKelas(b.Kelas), b.Durasi, mulai, selesai, b.Acak).Scan(&id)
 	if err != nil {
 		return err
 	}
@@ -1441,7 +1474,7 @@ func (s *Server) updateExam(c fiber.Ctx) error {
 	tag, err := s.pool.Exec(c.RequestCtx(),
 		`UPDATE exams SET nama=$1,mapel_id=$2,cp_id=NULLIF($3,0),kelas=$4,durasi_menit=$5,
 		 mulai_at=$6,selesai_at=$7,acak_soal=$8 WHERE id=$9`,
-		b.Nama, b.MapelID, b.CpID, b.Kelas, b.Durasi, mulai, selesai, b.Acak, eid)
+		b.Nama, b.MapelID, b.CpID, rapikanKelas(b.Kelas), b.Durasi, mulai, selesai, b.Acak, eid)
 	if err != nil {
 		s.log.Error("update exam gagal", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).SendString("Gagal mengubah ujian, silakan coba lagi.")
@@ -1646,12 +1679,12 @@ func (s *Server) studentDashboard(c fiber.Ctx) error {
 	s.pool.QueryRow(ctx, `SELECT nama,kelas FROM students WHERE id=$1`, cl.UID).Scan(&nama, &kelas)
 	var tugasBelum, materiN, ujianAktif int
 	s.pool.QueryRow(ctx,
-		`SELECT count(*) FROM assignments a WHERE (a.kelas='' OR a.kelas=$1)
+		`SELECT count(*) FROM assignments a WHERE (TRIM(a.kelas)='' OR `+normKelasSQL("a.kelas")+`=$1)
 		 AND NOT EXISTS(SELECT 1 FROM submissions sb WHERE sb.assignment_id=a.id AND sb.student_id=$2)`,
-		kelas, cl.UID).Scan(&tugasBelum)
-	s.pool.QueryRow(ctx, `SELECT count(*) FROM materials WHERE kelas='' OR kelas=$1`, kelas).Scan(&materiN)
+		normalizeKelas(kelas), cl.UID).Scan(&tugasBelum)
+	s.pool.QueryRow(ctx, `SELECT count(*) FROM materials WHERE TRIM(kelas)='' OR `+normKelasSQL("kelas")+`=$1`, normalizeKelas(kelas)).Scan(&materiN)
 	s.pool.QueryRow(ctx,
-		`SELECT count(*) FROM exams WHERE aktif AND (kelas='' OR kelas=$1)`, kelas).Scan(&ujianAktif)
+		`SELECT count(*) FROM exams WHERE aktif AND (TRIM(kelas)='' OR `+normKelasSQL("kelas")+`=$1)`, normalizeKelas(kelas)).Scan(&ujianAktif)
 	return c.JSON(fiber.Map{"nama": nama, "kelas": kelas,
 		"tugas_belum": tugasBelum, "materi": materiN, "ujian_aktif": ujianAktif})
 }
@@ -1663,7 +1696,7 @@ func (s *Server) studentMaterials(c fiber.Ctx) error {
 	rows, err := s.pool.Query(c.RequestCtx(),
 		`SELECT m.id,m.judul,m.isi,m.file_url,m.created_at,u.nama,s.nama,COALESCE(cp.elemen,''),COALESCE(cp.deskripsi,'')
 		 FROM materials m JOIN users u ON u.id=m.guru_id JOIN subjects s ON s.id=m.mapel_id
-		 LEFT JOIN cps cp ON cp.id=m.cp_id WHERE m.kelas='' OR m.kelas=$1 ORDER BY m.created_at DESC`, kelas)
+		 LEFT JOIN cps cp ON cp.id=m.cp_id WHERE TRIM(m.kelas)='' OR `+normKelasSQL("m.kelas")+`=$1 ORDER BY m.created_at DESC`, normalizeKelas(kelas))
 	if err != nil {
 		return err
 	}
@@ -1690,7 +1723,7 @@ func (s *Server) studentAssignments(c fiber.Ctx) error {
 		        sub.id,sub.nilai,sub.file_url,sub.jawaban,sub.feedback
 		 FROM assignments a JOIN users u ON u.id=a.guru_id JOIN subjects s ON s.id=a.mapel_id
 		 LEFT JOIN submissions sub ON sub.assignment_id=a.id AND sub.student_id=$1
-		 WHERE a.kelas='' OR a.kelas=$2 ORDER BY a.deadline NULLS LAST`, cl.UID, kelas)
+		 WHERE TRIM(a.kelas)='' OR `+normKelasSQL("a.kelas")+`=$2 ORDER BY a.deadline NULLS LAST`, cl.UID, normalizeKelas(kelas))
 	if err != nil {
 		return err
 	}
@@ -1735,7 +1768,7 @@ func (s *Server) submitAssignment(c fiber.Ctx) error {
 	}
 	var skelas string
 	s.pool.QueryRow(c.RequestCtx(), `SELECT kelas FROM students WHERE id=$1`, cl.UID).Scan(&skelas)
-	if kelas != "" && kelas != skelas {
+	if nk := normalizeKelas(kelas); nk != "" && nk != normalizeKelas(skelas) {
 		return fiber.ErrForbidden
 	}
 	if dl != nil && time.Now().After(*dl) {
@@ -1770,7 +1803,7 @@ func (s *Server) studentExams(c fiber.Ctx) error {
 		        att.status,att.skor
 		 FROM exams e JOIN subjects s ON s.id=e.mapel_id
 		 LEFT JOIN attempts att ON att.exam_id=e.id AND att.student_id=$1
-		 WHERE e.aktif AND (e.kelas='' OR e.kelas=$2)`, cl.UID, kelas)
+		 WHERE e.aktif AND (TRIM(e.kelas)='' OR `+normKelasSQL("e.kelas")+`=$2)`, cl.UID, normalizeKelas(kelas))
 	if err != nil {
 		return err
 	}
