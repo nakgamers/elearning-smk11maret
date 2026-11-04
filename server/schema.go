@@ -94,6 +94,20 @@ CREATE TABLE IF NOT EXISTS submissions (
   UNIQUE(assignment_id, student_id)
 );
 
+-- Pengumpulan tugas via link publik (tanpa login): siswa mengisi nama+kelas
+-- secara manual, jadi tabel ini berdiri sendiri (bukan FK ke students).
+CREATE TABLE IF NOT EXISTS kumpul_submissions (
+  id BIGSERIAL PRIMARY KEY,
+  nama TEXT NOT NULL,
+  kelas TEXT NOT NULL,
+  tugas TEXT NOT NULL,
+  catatan TEXT NOT NULL DEFAULT '',
+  file_url TEXT NOT NULL,
+  file_name TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_kumpul_created ON kumpul_submissions(created_at DESC);
+
 CREATE TABLE IF NOT EXISTS attendance (
   id BIGSERIAL PRIMARY KEY,
   student_id BIGINT NOT NULL REFERENCES students(id) ON DELETE CASCADE,

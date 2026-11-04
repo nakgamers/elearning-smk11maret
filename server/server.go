@@ -48,6 +48,8 @@ func NewApp(cfg Config, pool *pgxpool.Pool, cache Cache, log *zap.Logger) *fiber
 	pub.Get("/health", func(c fiber.Ctx) error { return c.JSON(fiber.Map{"ok": true}) })
 	pub.Get("/news", func(c fiber.Ctx) error { return s.listNews(c, true) })
 	pub.Post("/login", s.login)
+	pub.Get("/kumpul/kelas", s.kumpulKelasList)
+	pub.Post("/kumpul", s.kumpulSubmit)
 
 	api := app.Group("/api", s.auth)
 
@@ -84,6 +86,8 @@ func NewApp(cfg Config, pool *pgxpool.Pool, cache Cache, log *zap.Logger) *fiber
 	api.Put("/assignments/:id", adminGuru, s.updateAssignment)
 	api.Delete("/assignments/:id", adminGuru, s.deleteAssignment)
 	api.Get("/assignments/:id/submissions", adminGuru, s.listSubmissions)
+	api.Get("/kumpul", adminGuru, s.kumpulList)
+	api.Delete("/kumpul/:id", adminGuru, s.kumpulDelete)
 	api.Post("/submissions/:id/grade", adminGuru, s.gradeSubmission)
 	api.Get("/grades/export", adminGuru, s.exportGrades)
 	api.Get("/attendance", adminGuru, s.listAttendance)
@@ -2134,6 +2138,116 @@ func uploadMeta(name string) (ctype string, inline bool) {
 	default:
 		return "application/octet-stream", false
 	}
+}
+
+// ---------- Pengumpulan tugas via link publik (tanpa login) ----------
+
+// kumpulKelasList: daftar kelas untuk dropdown halaman publik — gabungan
+// rombel terdaftar + kelas yang benar-benar terpakai siswa aktif.
+func (s *Server) kumpulKelasList(c fiber.Ctx) error {
+	rows, err := s.pool.Query(c.RequestCtx(),
+		`SELECT k FROM (
+		   SELECT nama AS k FROM rombel
+		   UNION
+		   SELECT DISTINCT kelas FROM students WHERE aktif
+		 ) t WHERE k<>'' ORDER BY k`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			return err
+		}
+		out = append(out, k)
+	}
+	return c.JSON(fiber.Map{"kelas": out})
+}
+
+// kumpulSubmit menerima satu pengumpulan tugas dari halaman publik.
+// Tanpa akun: nama & kelas diisi manual oleh siswa; file wajib dilampirkan.
+func (s *Server) kumpulSubmit(c fiber.Ctx) error {
+	nama := strings.TrimSpace(c.FormValue("nama"))
+	kelas := strings.TrimSpace(c.FormValue("kelas"))
+	tugas := strings.TrimSpace(c.FormValue("tugas"))
+	catatan := strings.TrimSpace(c.FormValue("catatan"))
+	if nama == "" || kelas == "" || tugas == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "nama, kelas, dan judul tugas wajib diisi"})
+	}
+	if len(nama) > 100 || len(kelas) > 60 || len(tugas) > 160 || len(catatan) > 500 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "isian terlalu panjang"})
+	}
+	fh, err := c.FormFile("file")
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "file tugas wajib dilampirkan"})
+	}
+	furl, err := s.saveUpload(c, "file")
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	fname := filepath.Base(fh.Filename)
+	if len(fname) > 255 {
+		fname = fname[:255]
+	}
+	var id int64
+	err = s.pool.QueryRow(c.RequestCtx(),
+		`INSERT INTO kumpul_submissions(nama,kelas,tugas,catatan,file_url,file_name)
+		 VALUES($1,$2,$3,$4,$5,$6) RETURNING id`,
+		nama, kelas, tugas, catatan, furl, fname).Scan(&id)
+	if err != nil {
+		return err
+	}
+	return c.JSON(fiber.Map{"ok": true, "id": id})
+}
+
+// kumpulList: daftar pengumpulan publik untuk guru/admin (filter ?kelas=).
+func (s *Server) kumpulList(c fiber.Ctx) error {
+	kelas := strings.TrimSpace(c.Query("kelas"))
+	q := `SELECT id,nama,kelas,tugas,catatan,file_url,file_name,created_at
+	        FROM kumpul_submissions`
+	args := []any{}
+	if kelas != "" {
+		q += ` WHERE kelas=$1`
+		args = append(args, kelas)
+	}
+	q += ` ORDER BY created_at DESC LIMIT 300`
+	rows, err := s.pool.Query(c.RequestCtx(), q, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	out := []fiber.Map{}
+	for rows.Next() {
+		var id int64
+		var nama, kls, tugas, catatan, furl, fname string
+		var created time.Time
+		if err := rows.Scan(&id, &nama, &kls, &tugas, &catatan, &furl, &fname, &created); err != nil {
+			return err
+		}
+		out = append(out, fiber.Map{"id": id, "nama": nama, "kelas": kls, "tugas": tugas,
+			"catatan": catatan, "file_url": furl, "file_name": fname, "created_at": created})
+	}
+	return c.JSON(fiber.Map{"items": out})
+}
+
+// kumpulDelete menghapus satu pengumpulan publik beserta file-nya.
+func (s *Server) kumpulDelete(c fiber.Ctx) error {
+	id, _ := strconv.ParseInt(c.Params("id"), 10, 64)
+	if id == 0 {
+		return fiber.ErrBadRequest
+	}
+	var furl string
+	err := s.pool.QueryRow(c.RequestCtx(),
+		`DELETE FROM kumpul_submissions WHERE id=$1 RETURNING file_url`, id).Scan(&furl)
+	if err != nil {
+		return fiber.ErrNotFound
+	}
+	if furl != "" {
+		os.Remove(filepath.Join(s.cfg.UploadDir, filepath.Base(furl)))
+	}
+	return c.JSON(fiber.Map{"ok": true})
 }
 
 // serveUpload menyajikan file upload dgn header aman:

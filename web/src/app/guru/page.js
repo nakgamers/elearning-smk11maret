@@ -6,6 +6,7 @@ import { api } from '../lib/api'
 const TABS = [
   { id: 'materi', label: 'Materi', icon: '📚' },
   { id: 'tugas', label: 'Tugas & Nilai', icon: '📝' },
+  { id: 'kumpul', label: 'Kumpul Link', icon: '📥' },
   { id: 'absen', label: 'Absensi', icon: '🗓️' },
   { id: 'ujian', label: 'Ujian', icon: '📋' },
   { id: 'kuis', label: 'Kuis AI', icon: '🧠' },
@@ -28,6 +29,7 @@ export default function Guru() {
       subtitle="Dashboard Guru">
       {tab === 'materi' && <Materi />}
       {tab === 'tugas' && <Tugas />}
+      {tab === 'kumpul' && <KumpulLink />}
       {tab === 'absen' && <Absen />}
       {tab === 'ujian' && <Ujian />}
       {tab === 'kuis' && <KuisAI />}
@@ -1350,6 +1352,86 @@ function PapanSkor() {
         <button className="btn btn-ghost btn-sm" onClick={salinRekap}>📋 Salin rekap</button>
         <button className="btn btn-danger btn-sm" onClick={reset}>Reset</button>
       </div>
+    </div>
+  )
+}
+
+function KumpulLink() {
+  const [items, setItems] = useState([])
+  const [kelas, setKelas] = useState('')
+  const [cari, setCari] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [err, setErr] = useState('')
+  const [copied, setCopied] = useState(false)
+  const link = typeof window !== 'undefined' ? `${location.origin}/kumpul` : '/kumpul'
+
+  const load = async () => {
+    setLoading(true); setErr('')
+    try {
+      const r = await api.get('/kumpul')
+      setItems(r.items || [])
+    } catch (e) { setErr(e.message) }
+    setLoading(false)
+  }
+  useEffect(() => { load() }, [])
+
+  const kelasOpts = [...new Set(items.map((i) => i.kelas))].sort()
+  const visible = items.filter((i) =>
+    (!kelas || i.kelas === kelas) &&
+    (!cari || (i.nama + ' ' + i.tugas).toLowerCase().includes(cari.toLowerCase())))
+
+  const hapus = async (id) => {
+    if (!confirm('Hapus pengumpulan ini beserta file-nya?')) return
+    try { await api.del('/kumpul/' + id); load() } catch (e) { alert(e.message) }
+  }
+
+  const salin = async () => {
+    try { await navigator.clipboard.writeText(link); setCopied(true); setTimeout(() => setCopied(false), 2000) } catch {}
+  }
+
+  return (
+    <div>
+      <div className="card" style={{ padding: 16, marginBottom: 14 }}>
+        <div style={{ fontWeight: 700, marginBottom: 6 }}>Link pengumpulan publik (tanpa login)</div>
+        <div style={{ fontSize: 13, color: '#64748b', marginBottom: 10 }}>
+          Bagikan link ini ke siswa. Mereka cukup mengisi nama, kelas, judul tugas, lalu melampirkan file — tanpa akun SEMART.
+        </div>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <input className="input" readOnly value={link} style={{ flex: 1, minWidth: 220 }} onFocus={(e) => e.target.select()} />
+          <button className="btn" onClick={salin}>{copied ? 'Tersalin' : 'Salin link'}</button>
+          <button className="btn btn-ghost" onClick={load}>Muat ulang</button>
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
+        <select className="input" style={{ maxWidth: 220 }} value={kelas} onChange={(e) => setKelas(e.target.value)}>
+          <option value="">Semua kelas</option>
+          {kelasOpts.map((k) => <option key={k} value={k}>{k}</option>)}
+        </select>
+        <input className="input" style={{ maxWidth: 260 }} placeholder="Cari nama / judul tugas" value={cari} onChange={(e) => setCari(e.target.value)} />
+      </div>
+
+      {err && <div className="empty" style={{ color: '#dc2626' }}>{err}</div>}
+      {loading ? <div className="empty">Memuat…</div> : (
+        <table className="tbl">
+          <thead><tr><th>Waktu</th><th>Nama</th><th>Kelas</th><th>Tugas</th><th>File</th><th>Catatan</th><th>Aksi</th></tr></thead>
+          <tbody>
+            {visible.map((s) => (
+              <tr key={s.id}>
+                <td style={{ whiteSpace: 'nowrap' }}>{new Date(s.created_at).toLocaleString('id-ID', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}</td>
+                <td>{s.nama}</td>
+                <td>{s.kelas}</td>
+                <td>{s.tugas}</td>
+                <td>{s.file_url ? <a href={s.file_url} target="_blank" rel="noreferrer">{s.file_name || 'Unduh'}</a> : '-'}</td>
+                <td>{s.catatan || '-'}</td>
+                <td><button className="btn btn-danger btn-sm" onClick={() => hapus(s.id)}>Hapus</button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      {!loading && !visible.length && <div className="empty">Belum ada pengumpulan.</div>}
+      <div style={{ fontSize: 12, color: '#64748b', marginTop: 8 }}>Menampilkan {visible.length} dari {items.length} pengumpulan (maks 300 terbaru).</div>
     </div>
   )
 }
