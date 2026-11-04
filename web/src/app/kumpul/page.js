@@ -1,7 +1,7 @@
 'use client'
 import { useEffect, useState } from 'react'
 
-const ACCEPT = '.pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.png,.jpg,.jpeg,.zip,.rar,.mp4'
+const ACCEPT = '.pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.png,.jpg,.jpeg,.zip,.rar,.mp4,.html,.htm'
 const MAX_MB = 20
 
 export default function Kumpul() {
@@ -102,7 +102,7 @@ export default function Kumpul() {
             <input type="file" accept={ACCEPT} style={{ width: '100%', marginBottom: 6 }}
               onChange={(e) => setFile(e.target.files?.[0] || null)} />
             <div style={{ fontSize: 12, color: '#64748b', marginBottom: 14 }}>
-              {file ? `${file.name} · ${(file.size / 1024 / 1024).toFixed(2)} MB` : `PDF, Word, PowerPoint, Excel, gambar, ZIP/RAR, atau MP4 — maks ${MAX_MB}MB.`}
+              {file ? `${file.name} · ${(file.size / 1024 / 1024).toFixed(2)} MB` : `PDF, Word, PowerPoint, Excel, gambar, ZIP/RAR, MP4, atau HTML — maks ${MAX_MB}MB.`}
             </div>
 
             <label style={{ display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Catatan (opsional)</label>

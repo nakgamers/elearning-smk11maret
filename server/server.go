@@ -2183,7 +2183,7 @@ func (s *Server) kumpulSubmit(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "file tugas wajib dilampirkan"})
 	}
-	furl, err := s.saveUpload(c, "file")
+	furl, err := s.saveKumpulUpload(c, "file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
@@ -2200,6 +2200,50 @@ func (s *Server) kumpulSubmit(c fiber.Ctx) error {
 		return err
 	}
 	return c.JSON(fiber.Map{"ok": true, "id": id})
+}
+
+// saveKumpulUpload khusus pengumpulan publik: tipe standar sama seperti
+// saveUpload, DITAMBAH .html/.htm karena tugas landing page memang berupa
+// file HTML. File HTML tetap aman disajikan: serveUpload tidak pernah
+// menampilkannya inline — selalu attachment + CSP sandbox — jadi script di
+// dalamnya tidak jalan di origin SEMART, guru membuka salinan unduhannya.
+// Upload internal lain (materi/tugas/ujian) tetap memakai saveUpload yang
+// menolak HTML.
+func (s *Server) saveKumpulUpload(c fiber.Ctx, field string) (string, error) {
+	fh, err := c.FormFile(field)
+	if err != nil {
+		return "", fmt.Errorf("file tugas wajib dilampirkan")
+	}
+	ext := strings.ToLower(filepath.Ext(fh.Filename))
+	if ext != ".html" && ext != ".htm" {
+		return s.saveUpload(c, field)
+	}
+	if fh.Size > s.cfg.MaxUploadMB*1024*1024 {
+		return "", fmt.Errorf("file terlalu besar (maks %dMB)", s.cfg.MaxUploadMB)
+	}
+	// Validasi isi sebelum disimpan: harus teks HTML, bukan biner atau
+	// eksekutabel yang sekadar diganti ekstensinya.
+	src, err := fh.Open()
+	if err != nil {
+		return "", err
+	}
+	buf := make([]byte, 512)
+	n, _ := io.ReadFull(src, buf)
+	src.Close()
+	if n == 0 {
+		return "", fmt.Errorf("file kosong")
+	}
+	head := buf[:n]
+	ct := strings.ToLower(http.DetectContentType(head))
+	if bytes.Contains(head, []byte{0}) || !strings.HasPrefix(ct, "text/") || !bytes.Contains(head, []byte("<")) {
+		return "", fmt.Errorf("file bukan HTML valid (%s)", ct)
+	}
+	name := randHex(12) + ext
+	dst := filepath.Join(s.cfg.UploadDir, name)
+	if err := c.SaveFile(fh, dst); err != nil {
+		return "", err
+	}
+	return "/uploads/" + name, nil
 }
 
 // kumpulList: daftar pengumpulan publik untuk guru/admin (filter ?kelas=).
